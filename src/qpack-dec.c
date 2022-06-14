@@ -181,12 +181,13 @@ static int qpack_decode_fs_pfx(uint64_t *enc_ric, uint64_t *db, int *sign_bit,
  * a storage for some elements pointing into it. An end marker is inserted at
  * the end of the list with empty strings as name/value.
  *
- * Returns 0 on success. In case of error, a negative code QPACK_ERR_* is
- * returned.
+ * Returns the number of headers inserted into list excluding the end marker.
+ * In case of error, a negative code QPACK_ERR_* is returned.
  */
 int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
                     struct http_hdr *list, int list_size)
 {
+	struct ist name, value;
 	uint64_t enc_ric, db;
 	int s;
 	unsigned int efl_type;
@@ -307,8 +308,10 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 				goto out;
 			}
 
-			if (t)
-				list[hdr_idx++] = qpack_sht[index];
+			if (t) {
+				name = qpack_sht[index].n;
+				value = qpack_sht[index].v;
+			}
 			else {
 				/* RFC9204 2.2.3 Invalid References
 				 *
@@ -341,7 +344,7 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 			}
 
 			if (t)
-				list[hdr_idx] = qpack_sht[index];
+				name = qpack_sht[index].n;
 			else {
 				/* RFC9204 2.2.3 Invalid References
 				 *
@@ -386,10 +389,10 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 				qpack_debug_printf(stderr, " [name huff %d->%d '%s']", (int)length, (int)nlen, trash);
 				/* makes an ist from tmp storage */
 				b_add(tmp, nlen);
-				list[hdr_idx].v = ist2(trash, nlen);
+				value = ist2(trash, nlen);
 			}
 			else {
-				list[hdr_idx].v = ist2(raw, length);
+				value = ist2(raw, length);
 			}
 
 			if (len < length) {
@@ -400,7 +403,6 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 
 			raw += length;
 			len -= length;
-			++hdr_idx;
 		}
 		else if (efl_type & QPACK_LFL_WLN_BIT) {
 			/* Literal field line with literal name */
@@ -446,14 +448,15 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 				qpack_debug_printf(stderr, " [name huff %d->%d '%s']", (int)name_len, (int)nlen, trash);
 				/* makes an ist from tmp storage */
 				b_add(tmp, nlen);
-				list[hdr_idx].n = ist2(trash, nlen);
+				name = ist2(trash, nlen);
 			}
 			else {
-				list[hdr_idx].n = ist2(raw, name_len);
+				name = ist2(raw, name_len);
 			}
 
 			raw += name_len;
 			len -= name_len;
+
 			hvalue = *raw & 0x80;
 			value_len = qpack_get_varint(&raw, &len, 7);
 			if (len == (uint64_t)-1) {
@@ -490,17 +493,20 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 				qpack_debug_printf(stderr, " [name huff %d->%d '%s']", (int)value_len, (int)nlen, trash);
 				/* makes an ist from tmp storage */
 				b_add(tmp, nlen);
-				list[hdr_idx].v = ist2(trash, nlen);
+				value = ist2(trash, nlen);
 			}
 			else {
-				list[hdr_idx].v = ist2(raw, value_len);
+				value = ist2(raw, value_len);
 			}
 
 			raw += value_len;
 			len -= value_len;
-
-			++hdr_idx;
 		}
+
+		list[hdr_idx].n = name;
+		list[hdr_idx].v = value;
+		++hdr_idx;
+
 		qpack_debug_printf(stderr, "\n");
 	}
 
@@ -512,6 +518,7 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 
 	/* put an end marker */
 	list[hdr_idx].n = list[hdr_idx].v = IST_NULL;
+	ret = hdr_idx;
 
  out:
 	qpack_debug_printf(stderr, "-- done: ret=%d\n", ret);
