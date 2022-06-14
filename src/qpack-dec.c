@@ -251,7 +251,6 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 				goto out;
 			}
 
-			/* XXX Value string XXX */
 			raw += length;
 			len -= length;
 #endif
