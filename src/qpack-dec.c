@@ -297,10 +297,10 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 		else if (efl_type & QPACK_IFL_BIT) {
 			/* Indexed field line */
 			uint64_t index;
-			unsigned int t;
+			unsigned int static_tbl;
 
 			qpack_debug_printf(stderr, "indexed field line:");
-			t = efl_type & 0x40;
+			static_tbl = efl_type & 0x40;
 			index = qpack_get_varint(&raw, &len, 6);
 			if (len == (uint64_t)-1) {
 				qpack_debug_printf(stderr, "##ERR@%d\n", __LINE__);
@@ -308,7 +308,7 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 				goto out;
 			}
 
-			if (t) {
+			if (static_tbl) {
 				name = qpack_sht[index].n;
 				value = qpack_sht[index].v;
 			}
