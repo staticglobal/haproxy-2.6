@@ -326,7 +326,7 @@ int qpack_decode_fs(const unsigned char *raw, uint64_t len, struct buffer *tmp,
 				return -QPACK_DECOMPRESSION_FAILED;
 			}
 
-			qpack_debug_printf(stderr,  " t=%d index=%llu", !!t, (unsigned long long)index);
+			qpack_debug_printf(stderr,  " t=%d index=%llu", !!static_tbl, (unsigned long long)index);
 		}
 		else if (efl_type & QPACK_LFL_WNR_BIT) {
 			/* Literal field line with name reference */
