@@ -317,6 +317,12 @@ static inline void fd_want_send(int fd)
 	updt_fd_polling(fd);
 }
 
+/* returns the tgid from an fd (masks the refcount) */
+static forceinline int fd_tgid(int fd)
+{
+	return _HA_ATOMIC_LOAD(&fdtab[fd].refc_tgid) & 0xFFFF;
+}
+
 /* remove tid_bit from the fd's running mask and returns the bits that remain
  * after the atomic operation.
  */
@@ -337,10 +343,12 @@ static inline void fd_insert(int fd, void *owner, void (*iocb)(int fd), unsigned
 	BUG_ON(fd >= global.maxsock);
 	BUG_ON(fdtab[fd].owner != NULL);
 	BUG_ON(fdtab[fd].state != 0);
+	BUG_ON(fdtab[fd].refc_tgid != 0);
 
 	fdtab[fd].owner = owner;
 	fdtab[fd].iocb = iocb;
 	fdtab[fd].state = 0;
+	fdtab[fd].refc_tgid = 1;
 #ifdef DEBUG_FD
 	fdtab[fd].event_count = 0;
 #endif
