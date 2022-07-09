@@ -383,7 +383,7 @@ void fd_delete(int fd)
 
 	HA_ATOMIC_OR(&fdtab[fd].running_mask, tid_bit);
 	HA_ATOMIC_STORE(&fdtab[fd].thread_mask, 0);
-	if (fd_clr_running(fd) == 0)
+	if (fd_clr_running(fd) == ti->ltid_bit)
 		_fd_delete_orphan(fd);
 }
 
@@ -600,8 +600,7 @@ int fd_update_events(int fd, uint evts)
 	 * This is detected by both thread_mask and running_mask being 0 after
 	 * we remove ourselves last.
 	 */
-	if ((fdtab[fd].running_mask & tid_bit) &&
-	    fd_clr_running(fd) == 0 && !fdtab[fd].thread_mask) {
+	if (fd_clr_running(fd) == tid_bit && !fdtab[fd].thread_mask) {
 		_fd_delete_orphan(fd);
 		return FD_UPDT_CLOSED;
 	}
