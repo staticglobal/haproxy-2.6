@@ -438,8 +438,8 @@ static void quic_trace(enum trace_level level, uint64_t mask, const struct trace
 				              quic_enc_level_char(ssl_to_quic_enc_level(level)));
 			}
 
-			if (qc->err_code)
-				chunk_appendf(&trace_buf, " err_code=0x%llx", (ull)qc->err_code);
+			if (qc->err.code)
+				chunk_appendf(&trace_buf, " err_code=0x%llx", (ull)qc->err.code);
 		}
 
 		if (mask & (QUIC_EV_CONN_PRSFRM|QUIC_EV_CONN_BFRM)) {
@@ -1057,16 +1057,14 @@ static int quic_crypto_data_cpy(struct quic_enc_level *qel,
 /* Prepare the emission of CONNECTION_CLOSE with error <err>. All send/receive
  * activity for <qc> will be interrupted.
  */
-void quic_set_connection_close(struct quic_conn *qc, int err, int app)
+void quic_set_connection_close(struct quic_conn *qc, const struct quic_err err)
 {
 	if (qc->flags & QUIC_FL_CONN_IMMEDIATE_CLOSE)
 		return;
 
-	qc->err_code = err;
 	qc->flags |= QUIC_FL_CONN_IMMEDIATE_CLOSE;
-
-	if (app)
-		qc->flags |= QUIC_FL_CONN_APP_ALERT;
+	qc->err.code = err.code;
+	qc->err.app  = err.app;
 }
 
 /* Set <alert> TLS alert as QUIC CRYPTO_ERROR error */
@@ -1076,7 +1074,7 @@ void quic_set_tls_alert(struct quic_conn *qc, int alert)
 		qc->flags |= QUIC_FL_CONN_HALF_OPEN_CNT_DECREMENTED;
 		HA_ATOMIC_DEC(&qc->prx_counters->half_open_conn);
 	}
-	quic_set_connection_close(qc, QC_ERR_CRYPTO_ERROR | alert, 0);
+	quic_set_connection_close(qc, quic_err_tls(alert));
 	qc->flags |= QUIC_FL_CONN_TLS_ALERT;
 	TRACE_PROTO("Alert set", QUIC_EV_CONN_SSLDATA, qc);
 }
@@ -4339,6 +4337,7 @@ static struct quic_conn *qc_new_conn(const struct quic_version *qv, int ipv4,
 		qc->dcid.len = dcid->len;
 	}
 	qc->mux_state = QC_MUX_NULL;
+	qc->err = quic_err_transport(QC_ERR_NO_ERROR);
 
 	icid = new_quic_cid(&qc->cids, qc, 0);
 	if (!icid) {
@@ -6050,7 +6049,7 @@ static void qc_build_cc_frm(struct quic_conn *qc, struct quic_enc_level *qel,
 	 * more details on how to implement it.
 	 */
 
-	if (qc->flags & QUIC_FL_CONN_APP_ALERT) {
+	if (qc->err.app) {
 		if (unlikely(qel == &qc->els[QUIC_TLS_ENC_LEVEL_INITIAL] ||
 		             qel == &qc->els[QUIC_TLS_ENC_LEVEL_HANDSHAKE])) {
 			/* RFC 9000 10.2.3.  Immediate Close during the Handshake
@@ -6070,12 +6069,12 @@ static void qc_build_cc_frm(struct quic_conn *qc, struct quic_enc_level *qel,
 		}
 		else {
 			out->type = QUIC_FT_CONNECTION_CLOSE_APP;
-			out->connection_close.error_code = qc->err_code;
+			out->connection_close.error_code = qc->err.code;
 		}
 	}
 	else {
 		out->type = QUIC_FT_CONNECTION_CLOSE;
-		out->connection_close.error_code = qc->err_code;
+		out->connection_close.error_code = qc->err.code;
 	}
 }
 
@@ -6506,8 +6505,7 @@ static int qc_xprt_start(struct connection *conn, void *ctx)
 	if (qcc_install_app_ops(qc->qcc, qc->app_ops)) {
 		TRACE_PROTO("Cannot install app layer", QUIC_EV_CONN_LPKT, qc);
 		/* prepare a CONNECTION_CLOSE frame */
-		qc->err_code = QC_ERR_APPLICATION_ERROR;
-		qc->flags |= QUIC_FL_CONN_IMMEDIATE_CLOSE;
+		quic_set_connection_close(qc, quic_err_transport(QC_ERR_APPLICATION_ERROR));
 		return -1;
 	}
 
