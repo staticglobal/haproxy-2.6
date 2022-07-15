@@ -463,6 +463,14 @@ int fd_takeover(int fd, void *expected_owner)
 
 void updt_fd_polling(const int fd)
 {
+	uint tgrp = fd_take_tgid(fd);
+
+	/* closed ? may happen */
+	if (!tgrp)
+		return;
+
+	fd_drop_tgid(fd);
+
 	if (all_threads_mask == 1UL || (fdtab[fd].thread_mask & all_threads_mask) == tid_bit) {
 		if (HA_ATOMIC_BTS(&fdtab[fd].update_mask, tid))
 			return;
