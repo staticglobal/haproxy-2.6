@@ -1,0 +1,36 @@
+
+====== GIT ======
+To re-sync with haproxy upstream:
+
+First setup a new remote (only needs to be done once per clone)
+$ git remote add upstream http://git.haproxy.org/git/haproxy-2.6.git/
+But keep `origin` as the "default" remote for checkout
+git config checkout.defaultRemote origin
+
+Merge upstream master to local master
+$ git fetch --all
+$ git checkout master
+$ git merge upstream/master
+
+Merge master into our "bt" branch
+$ git checkout bt
+$ git merge master
+
+Fork a new version-specific bt branch
+$ git checkout -b bt-2.6.X
+
+Push all changes to stash
+$ git push --all origin
+
+====== BUILDING ======
+We build haproxy with the following command:
+        make -j9 \
+            TARGET=linux-glibc \
+            USE_GETADDRINFO=1 \
+            USE_LIBCRYPT= \
+            USE_OPENSSL=1 \
+            USE_PCRE2=1 \
+            USE_PCRE2_JIT=1
+
+To build a copy that dumps debug output to STDERR, also include
+            DEBUG=-DDEBUG_FULL
