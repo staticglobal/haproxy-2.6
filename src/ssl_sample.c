@@ -1922,6 +1922,89 @@ smp_fetch_ssl_fc_cl_str(const struct arg *args, struct sample *smp, const char *
 #endif
 }
 
+static int
+smp_fetch_ssl_fc_server_end_point(const struct arg *args, struct sample *smp, const char *kw, void *private)
+{
+	int cert_peer = (kw[4] == 'c' || kw[4] == 's') ? 1 : 0;
+    struct connection *conn;
+    //struct connection *conn = (!conn_server) ?
+    //                          objt_conn(smp->sess->origin) :
+    //                          smp->strm ? cs_conn(objt_cs(smp->strm->si[1].end)) : NULL;
+    struct buffer *smp_trash;
+    X509 *crt = NULL;
+    const EVP_MD *digest;
+    unsigned int sig_nid, sig_len;
+    int digest_nid;
+    int ret = 0;
+	SSL *ssl;
+
+	if (obj_type(smp->sess->origin) == OBJ_TYPE_CHECK)
+		conn = (kw[4] == 'b') ? cs_conn(__objt_check(smp->sess->origin)->cs) : NULL;
+	else
+		conn = (kw[4] != 'b') ? objt_conn(smp->sess->origin) :
+			smp->strm ? cs_conn(objt_cs(smp->strm->si[1].end)) : NULL;
+
+	smp->flags = 0;
+	ssl = ssl_sock_get_ssl_object(conn);
+	if (!ssl)
+		return 0;
+
+	if (conn->flags & CO_FL_WAIT_XPRT) {
+        smp->flags |= SMP_F_MAY_CHANGE;
+        return 0;
+    }
+
+	if (cert_peer)
+		crt = SSL_get_peer_certificate(ssl);
+	else
+		crt = SSL_get_certificate(ssl);
+	if (!crt)
+		goto out;
+
+    sig_nid = X509_get_signature_nid(crt);
+
+    // The signature algorithm is NOT a digest algo.
+    // Lookup the proper digest to use for a signature/w/digest first
+    if (!OBJ_find_sigid_algs(sig_nid, &digest_nid, NULL)){
+        SSLerr(SSL_F_SSL3_CTRL, ERR_R_INTERNAL_ERROR);
+        goto out;
+    }
+
+    if (digest_nid == NID_undef) {
+        SSLerr(SSL_F_SSL3_CTRL, ERR_R_INTERNAL_ERROR);
+        goto out;
+    }
+
+    smp_trash = get_trash_chunk();
+	if (ssl_sock_crt2der(crt, smp_trash) <= 0)
+		goto out;
+
+    // If the certificate was signed with MD5/SHA-1, use SHA-256
+    // instead
+    if (digest_nid == NID_md5 || digest_nid == NID_md5WithRSAEncryption ||
+        digest_nid == NID_md5WithRSA || digest_nid == NID_sha1 ||
+        digest_nid == NID_sha1WithRSAEncryption || digest_nid == NID_sha1WithRSA)
+        digest_nid = NID_sha256;
+
+    digest = EVP_get_digestbynid(digest_nid);
+    if (!digest) {
+        SSLerr(SSL_F_SSL3_CTRL, ERR_R_INTERNAL_ERROR);
+        goto out;
+    }
+	X509_digest(crt, digest, (unsigned char *) smp_trash->area, &sig_len);
+    smp_trash->data = sig_len;
+    smp->flags = SMP_F_VOL_SESS;
+    smp->data.u.str = *smp_trash;
+    smp->data.type = SMP_T_BIN;
+
+    ret = 1;
+
+out:
+    if (cert_peer && crt)
+        X509_free(crt);
+    return ret;
+}
+
 #if HA_OPENSSL_VERSION_NUMBER > 0x0090800fL
 static int
 smp_fetch_ssl_fc_unique_id(const struct arg *args, struct sample *smp, const char *kw, void *private)
@@ -2089,6 +2172,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 #endif
 	{ "ssl_bc_is_resumed",      smp_fetch_ssl_fc_is_resumed,  0,                   NULL,    SMP_T_BOOL, SMP_USE_L5SRV },
 	{ "ssl_bc_protocol",        smp_fetch_ssl_fc_protocol,    0,                   NULL,    SMP_T_STR,  SMP_USE_L5SRV },
+	{ "ssl_bc_server_end_point", smp_fetch_ssl_fc_server_end_point, 0,             NULL,    SMP_T_BIN,  SMP_USE_L5SRV },
 	{ "ssl_bc_unique_id",       smp_fetch_ssl_fc_unique_id,   0,                   NULL,    SMP_T_BIN,  SMP_USE_L5SRV },
 	{ "ssl_bc_use_keysize",     smp_fetch_ssl_fc_use_keysize, 0,                   NULL,    SMP_T_SINT, SMP_USE_L5SRV },
 #if HA_OPENSSL_VERSION_NUMBER > 0x0090800fL
@@ -2141,6 +2225,7 @@ static struct sample_fetch_kw_list sample_fetch_keywords = {ILH, {
 	{ "ssl_fc_alpn",            smp_fetch_ssl_fc_alpn,        0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
 #endif
 	{ "ssl_fc_protocol",        smp_fetch_ssl_fc_protocol,    0,                   NULL,    SMP_T_STR,  SMP_USE_L5CLI },
+	{ "ssl_fc_server_end_point", smp_fetch_ssl_fc_server_end_point, 0,             NULL,    SMP_T_BIN,  SMP_USE_L5CLI },
 #if HA_OPENSSL_VERSION_NUMBER > 0x0090800fL
 	{ "ssl_fc_unique_id",       smp_fetch_ssl_fc_unique_id,   0,                   NULL,    SMP_T_BIN,  SMP_USE_L5CLI },
 #endif
