@@ -1939,10 +1939,10 @@ smp_fetch_ssl_fc_server_end_point(const struct arg *args, struct sample *smp, co
 	SSL *ssl;
 
 	if (obj_type(smp->sess->origin) == OBJ_TYPE_CHECK)
-		conn = (kw[4] == 'b') ? cs_conn(__objt_check(smp->sess->origin)->cs) : NULL;
+		conn = (kw[4] == 'b') ? sc_conn(__objt_check(smp->sess->origin)->sc) : NULL;
 	else
 		conn = (kw[4] != 'b') ? objt_conn(smp->sess->origin) :
-			smp->strm ? cs_conn(objt_cs(smp->strm->si[1].end)) : NULL;
+			smp->strm ? sc_conn(smp->strm->scb) : NULL;
 
 	smp->flags = 0;
 	ssl = ssl_sock_get_ssl_object(conn);
