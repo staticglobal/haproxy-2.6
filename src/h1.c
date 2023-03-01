@@ -1073,7 +1073,15 @@ int h1_headers_to_hdr_list(char *start, const char *stop,
 			if (sl.rq.meth == HTTP_METH_CONNECT) {
 				struct ist *host = ((host_idx != -1) ? &hdr[host_idx].v : NULL);
 
-				ret = h1_validate_connect_authority(authority, host);
+				/*
+				 * Modified by bholbrook@beyondtrust.com
+				 * We intentionally relax the validation for CONNECT targets because existing
+				 * clients make dirty requests like `CONNECT /ns HTTP/1.1` (no scheme, host, port)
+				 * As of trymax-23.2, native clients should now all be using GET for these requests,
+				 * but it may take some time for mobile/external clients to also migrate
+				 */
+				//ret = h1_validate_connect_authority(authority, host);
+				ret = 0;
 				if (ret < 0) {
 					if (h1m->err_pos < -1) {
 						state = H1_MSG_LAST_LF;
