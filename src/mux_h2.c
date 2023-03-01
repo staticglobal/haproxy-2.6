@@ -2798,8 +2798,11 @@ static struct h2s *h2c_frt_handle_headers(struct h2c *h2c, struct h2s *h2s)
 		if (h2s->st != H2_SS_CLOSED) {
 			error = h2c_decode_headers(h2c, &h2s->rxbuf, &h2s->flags, &body_len, NULL);
 			/* unrecoverable error ? */
-			if (h2c->st0 >= H2_CS_ERROR)
+			if (h2c->st0 >= H2_CS_ERROR) {
+				TRACE_USER("Unrecoverable error decoding H2 trailers", H2_EV_RX_FRAME|H2_EV_RX_HDR|H2_EV_STRM_NEW|H2_EV_STRM_END, h2c->conn, 0, &rxbuf);
+				sess_log(h2c->conn->owner);
 				goto out;
+			}
 
 			if (error == 0) {
 				/* Demux not blocked because of the stream, it is an incomplete frame */
@@ -2812,7 +2815,9 @@ static struct h2s *h2c_frt_handle_headers(struct h2c *h2c, struct h2s *h2s)
 				/* Failed to decode this frame (e.g. too large request)
 				 * but the HPACK decompressor is still synchronized.
 				 */
+				sess_log(h2c->conn->owner);
 				h2s_error(h2s, H2_ERR_INTERNAL_ERROR);
+				TRACE_USER("Stream error decoding H2 trailers", H2_EV_RX_FRAME|H2_EV_RX_HDR|H2_EV_STRM_NEW|H2_EV_STRM_END, h2c->conn, 0, &rxbuf);
 				h2c->st0 = H2_CS_FRAME_E;
 				goto out;
 			}
@@ -2822,6 +2827,7 @@ static struct h2s *h2c_frt_handle_headers(struct h2c *h2c, struct h2s *h2s)
 		 * the data and send another RST.
 		 */
 		error = h2c_decode_headers(h2c, &rxbuf, &flags, &body_len, NULL);
+		sess_log(h2c->conn->owner);
 		h2s = (struct h2s*)h2_error_stream;
 		goto send_rst;
 	}
@@ -2839,8 +2845,11 @@ static struct h2s *h2c_frt_handle_headers(struct h2c *h2c, struct h2s *h2s)
 	error = h2c_decode_headers(h2c, &rxbuf, &flags, &body_len, NULL);
 
 	/* unrecoverable error ? */
-	if (h2c->st0 >= H2_CS_ERROR)
+	if (h2c->st0 >= H2_CS_ERROR) {
+		TRACE_USER("Unrecoverable error decoding H2 request", H2_EV_RX_FRAME|H2_EV_RX_HDR|H2_EV_STRM_NEW|H2_EV_STRM_END, h2c->conn, 0, &rxbuf);
+		sess_log(h2c->conn->owner);
 		goto out;
+	}
 
 	if (error <= 0) {
 		if (error == 0) {
@@ -2853,6 +2862,7 @@ static struct h2s *h2c_frt_handle_headers(struct h2c *h2c, struct h2s *h2s)
 		/* Failed to decode this stream (e.g. too large request)
 		 * but the HPACK decompressor is still synchronized.
 		 */
+		sess_log(h2c->conn->owner);
 		h2s = (struct h2s*)h2_error_stream;
 		goto send_rst;
 	}
@@ -2954,8 +2964,10 @@ static struct h2s *h2c_bck_handle_headers(struct h2c *h2c, struct h2s *h2s)
 	}
 
 	/* unrecoverable error ? */
-	if (h2c->st0 >= H2_CS_ERROR)
+	if (h2c->st0 >= H2_CS_ERROR) {
+		TRACE_USER("Unrecoverable error decoding H2 HEADERS", H2_EV_RX_FRAME|H2_EV_RX_HDR, h2c->conn, h2s);
 		goto fail;
+	}
 
 	if (h2s->st != H2_SS_OPEN && h2s->st != H2_SS_HLOC) {
 		/* RFC7540#5.1 */
@@ -4985,6 +4997,11 @@ next_frame:
 		*flags |= H2_SF_HEADERS_RCVD;
 
 	if (h2c->dff & H2_F_HEADERS_END_STREAM) {
+		if (msgf & H2_MSGF_RSP_1XX) {
+			/* RFC9113#8.1 : HEADERS frame with the ES flag set that carries an informational status code is malformed */
+			TRACE_STATE("invalid interim response with ES flag!", H2_EV_RX_FRAME|H2_EV_RX_HDR|H2_EV_H2C_ERR|H2_EV_PROTO_ERR, h2c->conn);
+			goto fail;
+		}
 		/* no more data are expected for this message */
 		htx->flags |= HTX_FL_EOM;
 	}
@@ -6770,6 +6787,13 @@ static int h2_show_fd(struct buffer *msg, struct connection *conn)
 		      (unsigned int)b_head_ofs(hmbuf), (unsigned int)b_size(hmbuf),
 		      (unsigned int)b_data(tmbuf), b_orig(tmbuf),
 		      (unsigned int)b_head_ofs(tmbuf), (unsigned int)b_size(tmbuf));
+
+	chunk_appendf(msg, " .task=%p", h2c->task);
+	if (h2c->task) {
+		chunk_appendf(msg, " .exp=%s",
+			      h2c->task->expire ? tick_is_expired(h2c->task->expire, now_ms) ? "<PAST>" :
+			      human_time(TICKS_TO_MS(h2c->task->expire - now_ms), TICKS_TO_MS(1000)) : "<NEVER>");
+	}
 
 	if (h2s) {
 		chunk_appendf(msg, " last_h2s=%p .id=%d .st=%s .flg=0x%04x .rxbuf=%u@%p+%u/%u .sc=%p",

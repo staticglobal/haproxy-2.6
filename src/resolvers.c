@@ -291,11 +291,11 @@ static void resolv_update_resolvers_timeout(struct resolvers *resolvers)
 	next = tick_add(now_ms, resolvers->timeout.resolve);
 	if (!LIST_ISEMPTY(&resolvers->resolutions.curr)) {
 		res  = LIST_NEXT(&resolvers->resolutions.curr, struct resolv_resolution *, list);
-		next = MIN(next, tick_add(res->last_query, resolvers->timeout.retry));
+		next = tick_first(next, tick_add(res->last_query, resolvers->timeout.retry));
 	}
 
 	list_for_each_entry(res, &resolvers->resolutions.wait, list)
-		next = MIN(next, tick_add(res->last_resolution, resolv_resolution_timeout(res)));
+		next = tick_first(next, tick_add(res->last_resolution, resolv_resolution_timeout(res)));
 
 	resolvers->t->expire = next;
 	task_queue(resolvers->t);
@@ -460,8 +460,17 @@ void resolv_trigger_resolution(struct resolv_requester *req)
 	 * valid */
 	exp = tick_add(res->last_resolution, resolvers->hold.valid);
 	if (resolvers->t && (res->status != RSLV_STATUS_VALID ||
-	    !tick_isset(res->last_resolution) || tick_is_expired(exp, now_ms)))
+	    !tick_isset(res->last_resolution) || tick_is_expired(exp, now_ms))) {
+		/* If the resolution is not running and the requester is a
+		 * server, reset the resoltion timer to force a quick
+		 * resolution.
+		 */
+		if (res->step == RSLV_STEP_NONE &&
+		    (obj_type(req->owner) == OBJ_TYPE_SERVER ||
+		     obj_type(req->owner) == OBJ_TYPE_SRVRQ))
+			res->last_resolution = TICK_ETERNITY;
 		task_wakeup(resolvers->t, TASK_WOKEN_OTHER);
+	}
 
 	leave_resolver_code();
 }
@@ -810,6 +819,9 @@ srv_found:
 				srv->flags &= ~SRV_F_NO_RESOLUTION;
 				srv->srvrq_check->expire = TICK_ETERNITY;
 
+				srv->svc_port = item->port;
+				srv->flags   &= ~SRV_F_MAPPORTS;
+
 				/* Check if an Additional Record is associated to this SRV record.
 				 * Perform some sanity checks too to ensure the record can be used.
 				 * If all fine, we simply pick up the IP address found and associate
@@ -863,9 +875,6 @@ srv_found:
 
 				/* Update the server status */
 				srvrq_update_srv_status(srv, (srv->addr.ss_family != AF_INET && srv->addr.ss_family != AF_INET6));
-
-				srv->svc_port = item->port;
-				srv->flags   &= ~SRV_F_MAPPORTS;
 
 				if (!srv->resolv_opts.ignore_weight) {
 					char weight[9];
@@ -2631,7 +2640,7 @@ static int stats_dump_resolv_to_buffer(struct stconn *sc,
 	if (!stats_dump_one_line(stats, idx, appctx))
 		return 0;
 
-	if (!stats_putchk(rep, NULL, &trash))
+	if (!stats_putchk(rep, NULL))
 		goto full;
 
 	return 1;
@@ -2921,7 +2930,12 @@ enum act_return resolv_action_do_resolve(struct act_rule *rule, struct proxy *px
 		if (resolution->step == RSLV_STEP_RUNNING)
 			goto yield;
 		if (resolution->step == RSLV_STEP_NONE) {
-			/* We update the variable only if we have a valid response. */
+			/* We update the variable only if we have a valid
+			 * response. If the response was not received yet, we
+			 * must yield.
+			 */
+			if (resolution->status == RSLV_STATUS_NONE)
+				goto yield;
 			if (resolution->status == RSLV_STATUS_VALID) {
 				struct sample smp;
 				short ip_sin_family = 0;

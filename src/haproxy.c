@@ -1,6 +1,6 @@
 /*
  * HAProxy : High Availability-enabled HTTP/TCP proxy
- * Copyright 2000-2022 Willy Tarreau <willy@haproxy.org>.
+ * Copyright 2000-2023 Willy Tarreau <willy@haproxy.org>.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -880,6 +880,17 @@ void reexec_on_failure()
 	mworker_reexec_waitmode();
 }
 
+/*
+ * Exit with an error message upon a wait-mode failure.
+ */
+void exit_on_waitmode_failure()
+{
+	if (!atexit_flag)
+		return;
+
+	ha_alert("Non-recoverable mworker wait-mode error, exiting.\n");
+}
+
 
 /*
  * upon SIGUSR1, let's have a soft stop. Note that soft_stop() broadcasts
@@ -1479,6 +1490,8 @@ static void init_early(int argc, char **argv)
 	char *tmp;
 	int len;
 
+	setenv("HAPROXY_STARTUP_VERSION", HAPROXY_VERSION, 0);
+
 	/* First, let's initialize most global variables */
 	totalconn = actconn = listeners = stopping = 0;
 	killed = pid = 0;
@@ -1878,6 +1891,26 @@ static void dump_registered_keywords(void)
 	}
 }
 
+/* Generate a random cluster-secret in case the setting is not provided in the
+ * configuration. This allows to use features which rely on it albeit with some
+ * limitations.
+ */
+static void generate_random_cluster_secret()
+{
+	/* used as a default random cluster-secret if none defined. */
+	uint64_t rand = ha_random64();
+
+	/* The caller must not overwrite an already defined secret. */
+	BUG_ON(global.cluster_secret);
+
+	global.cluster_secret = malloc(8);
+	if (!global.cluster_secret)
+		return;
+
+	memcpy(global.cluster_secret, &rand, sizeof(rand));
+	global.cluster_secret[7] = '\0';
+}
+
 /*
  * This function initializes all the necessary variables. It only returns
  * if everything is OK. If something fails, it exits.
@@ -1913,10 +1946,17 @@ static void init(int argc, char **argv)
 		global.mode &= ~MODE_MWORKER;
 	}
 
-	if ((global.mode & (MODE_MWORKER | MODE_CHECK | MODE_CHECK_CONDITION)) == MODE_MWORKER &&
-	    (getenv("HAPROXY_MWORKER_REEXEC") != NULL)) {
-		atexit_flag = 1;
-		atexit(reexec_on_failure);
+	/* set the atexit functions when not doing configuration check */
+	if (!(global.mode & (MODE_CHECK | MODE_CHECK_CONDITION))
+	    && (getenv("HAPROXY_MWORKER_REEXEC") != NULL)) {
+
+		if (global.mode & MODE_MWORKER) {
+			atexit_flag = 1;
+			atexit(reexec_on_failure);
+		} else if (global.mode & MODE_MWORKER_WAIT) {
+			atexit_flag = 1;
+			atexit(exit_on_waitmode_failure);
+		}
 	}
 
 	if (change_dir && chdir(change_dir) < 0) {
@@ -2500,6 +2540,9 @@ static void init(int argc, char **argv)
 		exit(1);
 	}
 
+	if (!global.cluster_secret)
+		generate_random_cluster_secret();
+
 	/*
 	 * Note: we could register external pollers here.
 	 * Built-in pollers have been registered before main().
@@ -2686,10 +2729,10 @@ void deinit(void)
 	idle_conn_task = NULL;
 
 	list_for_each_entry_safe(log, logb, &global.logsrvs, list) {
-			LIST_DELETE(&log->list);
-			free(log->conf.file);
-			free(log);
-		}
+		LIST_DEL_INIT(&log->list);
+		free_logsrv(log);
+	}
+
 	list_for_each_entry_safe(wl, wlb, &cfg_cfgfiles, list) {
 		free(wl->s);
 		LIST_DELETE(&wl->list);

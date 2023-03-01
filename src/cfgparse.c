@@ -3501,16 +3501,7 @@ out_uri_auth_compat:
 		while (newsrv != NULL) {
 			set_usermsgs_ctx(newsrv->conf.file, newsrv->conf.line, &newsrv->obj_type);
 
-			if (newsrv->minconn > newsrv->maxconn) {
-				/* Only 'minconn' was specified, or it was higher than or equal
-				 * to 'maxconn'. Let's turn this into maxconn and clean it, as
-				 * this will avoid further useless expensive computations.
-				 */
-				newsrv->maxconn = newsrv->minconn;
-			} else if (newsrv->maxconn && !newsrv->minconn) {
-				/* minconn was not specified, so we set it to maxconn */
-				newsrv->minconn = newsrv->maxconn;
-			}
+			srv_minmax_conn_apply(newsrv);
 
 			/* this will also properly set the transport layer for
 			 * prod and checks
@@ -4018,9 +4009,14 @@ init_proxies_list_stage2:
 #ifdef USE_QUIC
 			/* override the accept callback for QUIC listeners. */
 			if (listener->flags & LI_F_QUIC_LISTENER) {
-				if (!global.cluster_secret)
+				if (!global.cluster_secret) {
 					diag_no_cluster_secret = 1;
-				listener->accept = quic_session_accept;
+					if (listener->bind_conf->options & BC_O_QUIC_FORCE_RETRY) {
+						ha_alert("QUIC listener with quic-force-retry requires global cluster-secret to be set.\n");
+						cfgerr++;
+					}
+				}
+
 				li_init_per_thr(listener);
 			}
 #endif
@@ -4071,9 +4067,11 @@ init_proxies_list_stage2:
 			goto init_proxies_list_stage2;
 	}
 
-	if (diag_no_cluster_secret)
-		ha_diag_warning("No cluster secret was set. The stateless reset and Retry"
-		                " features are disabled for all QUIC bindings.\n");
+	if (diag_no_cluster_secret) {
+		ha_diag_warning("Generating a random cluster secret. "
+		                "You should define your own one in the configuration to ensure consistency "
+		                "after reload/restart or across your whole cluster.\n");
+	}
 
 	/*
 	 * Recount currently required checks.

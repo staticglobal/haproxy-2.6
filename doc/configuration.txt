@@ -3,7 +3,7 @@
                           Configuration Manual
                          ----------------------
                               version 2.6
-                              2022/09/22
+                              2023/02/14
 
 
 This document covers the configuration language as implemented in the version
@@ -763,6 +763,10 @@ file, or could be inherited by a program (See 3.7. Programs):
 * HAPROXY_MASTER_CLI: In master-worker mode, listeners addresses of the master
   CLI, separated by semicolons.
 
+* HAPROXY_STARTUP_VERSION: contains the version used to start, in master-worker
+  mode this is the version which was used to start the master, even after
+  updating the binary and reloading.
+
 In addition, some pseudo-variables are internally resolved and may be used as
 regular variables. Pseudo-variables always start with a dot ('.'), and are the
 only ones where the dot is permitted. The current list of pseudo-variables is:
@@ -996,40 +1000,44 @@ of them have command-line equivalents.
 The following keywords are supported in the "global" section :
 
  * Process management and security
+   - 51degrees-cache-size
+   - 51degrees-data-file
+   - 51degrees-property-name-list
+   - 51degrees-property-separator
    - ca-base
    - chroot
    - cluster-secret
-   - crt-base
    - cpu-map
+   - crt-base
    - daemon
    - default-path
    - description
    - deviceatlas-json-file
    - deviceatlas-log-level
-   - deviceatlas-separator
    - deviceatlas-properties-cookie
+   - deviceatlas-separator
    - expose-experimental-directives
    - external-check
    - fd-hard-limit
    - gid
    - grace
    - group
+   - h1-accept-payload-with-any-method
+   - h1-case-adjust
+   - h1-case-adjust-file
+   - h2-workaround-bogus-websocket-clients
    - hard-stop-after
    - httpclient.resolvers.id
    - httpclient.resolvers.prefer
    - httpclient.ssl.ca-file
    - httpclient.ssl.verify
-   - h1-accept-payload-with-any-method
-   - h1-case-adjust
-   - h1-case-adjust-file
    - insecure-fork-wanted
    - insecure-setuid-wanted
    - issuers-chain-path
-   - h2-workaround-bogus-websocket-clients
    - localpeer
    - log
-   - log-tag
    - log-send-hostname
+   - log-tag
    - lua-load
    - lua-load-per-thread
    - lua-prepend-path
@@ -1041,13 +1049,9 @@ The following keywords are supported in the "global" section :
    - pp2-never-send-local
    - presetenv
    - resetenv
-   - uid
-   - ulimit-n
-   - user
    - set-dumpable
    - set-var
    - setenv
-   - stats
    - ssl-default-bind-ciphers
    - ssl-default-bind-ciphersuites
    - ssl-default-bind-curves
@@ -1061,25 +1065,25 @@ The following keywords are supported in the "global" section :
    - ssl-provider-path
    - ssl-server-verify
    - ssl-skip-self-issued-ca
+   - stats
+   - strict-limits
+   - uid
+   - ulimit-n
    - unix-bind
    - unsetenv
-   - 51degrees-data-file
-   - 51degrees-property-name-list
-   - 51degrees-property-separator
-   - 51degrees-cache-size
+   - user
+   - wurfl-cache-size
    - wurfl-data-file
    - wurfl-information-list
    - wurfl-information-list-separator
-   - wurfl-cache-size
-   - strict-limits
 
  * Performance tuning
    - busy-polling
    - max-spread-checks
+   - maxcompcpuusage
+   - maxcomprate
    - maxconn
    - maxconnrate
-   - maxcomprate
-   - maxcompcpuusage
    - maxpipes
    - maxsessrate
    - maxsslconn
@@ -1087,16 +1091,16 @@ The following keywords are supported in the "global" section :
    - maxzlibmem
    - no-memory-trimming
    - noepoll
-   - nokqueue
    - noevports
-   - nopoll
-   - nosplice
    - nogetaddrinfo
+   - nokqueue
+   - nopoll
    - noreuseport
+   - nosplice
    - profiling.tasks
-   - spread-checks
    - server-state-base
    - server-state-file
+   - spread-checks
    - ssl-engine
    - ssl-mode-async
    - tune.buffers.limit
@@ -1114,9 +1118,9 @@ The following keywords are supported in the "global" section :
    - tune.idletimer
    - tune.lua.forced-yield
    - tune.lua.maxmem
+   - tune.lua.service-timeout
    - tune.lua.session-timeout
    - tune.lua.task-timeout
-   - tune.lua.service-timeout
    - tune.maxaccept
    - tune.maxpollevents
    - tune.maxrewrite
@@ -1137,15 +1141,15 @@ The following keywords are supported in the "global" section :
    - tune.sndbuf.client
    - tune.sndbuf.server
    - tune.ssl.cachesize
+   - tune.ssl.capture-buffer-size
+   - tune.ssl.capture-cipherlist-size (deprecated)
+   - tune.ssl.default-dh-param
    - tune.ssl.force-private-cache
    - tune.ssl.hard-maxrecord
    - tune.ssl.keylog
    - tune.ssl.lifetime
    - tune.ssl.maxrecord
-   - tune.ssl.default-dh-param
    - tune.ssl.ssl-ctx-cache-size
-   - tune.ssl.capture-buffer-size
-   - tune.ssl.capture-cipherlist-size (deprecated)
    - tune.vars.global-max-size
    - tune.vars.proc-max-size
    - tune.vars.reqres-max-size
@@ -1162,6 +1166,36 @@ The following keywords are supported in the "global" section :
 3.1. Process management and security
 ------------------------------------
 
+51degrees-data-file <file path>
+  The path of the 51Degrees data file to provide device detection services. The
+  file should be unzipped and accessible by HAProxy with relevant permissions.
+
+  Please note that this option is only available when HAProxy has been
+  compiled with USE_51DEGREES.
+
+51degrees-property-name-list [<string> ...]
+  A list of 51Degrees property names to be load from the dataset. A full list
+  of names is available on the 51Degrees website:
+  https://51degrees.com/resources/property-dictionary
+
+  Please note that this option is only available when HAProxy has been
+  compiled with USE_51DEGREES.
+
+51degrees-property-separator <char>
+  A char that will be appended to every property value in a response header
+  containing 51Degrees results. If not set that will be set as ','.
+
+  Please note that this option is only available when HAProxy has been
+  compiled with USE_51DEGREES.
+
+51degrees-cache-size <number>
+  Sets the size of the 51Degrees converter cache to <number> entries. This
+  is an LRU cache which reminds previous device detections and their results.
+  By default, this cache is disabled.
+
+  Please note that this option is only available when HAProxy has been
+  compiled with USE_51DEGREES.
+
 ca-base <dir>
   Assigns a default directory to fetch SSL CA certificates and CRLs from when a
   relative path is used with "ca-file", "ca-verify-file" or "crl-file"
@@ -1175,14 +1209,6 @@ chroot <jail dir>
   attacker to exploit the system. This only works when the process is started
   with superuser privileges. It is important to ensure that <jail_dir> is both
   empty and non-writable to anyone.
-
-cluster-secret <secret>
-  Define an ASCII string secret shared between several nodes belonging to the
-  same cluster. It could be used for different usages. It is at least used to
-  derive stateless reset tokens for all the QUIC connections instantiated by
-  this process. This is also the case to derive secrets used to encrypt Retry
-  tokens. If you do not set this parameter, the stateless reset and Retry QUIC
-  features will be both silently disabled.
 
 close-spread-time <time>
   Define a time window during which idle connections and active connections
@@ -1210,12 +1236,20 @@ close-spread-time <time>
 
   See also: grace, hard-stop-after, idle-close-on-response
 
-cpu-map [auto:]<process-set>[/<thread-set>] <cpu-set>...
-  On some operating systems, it is possible to bind a process or a thread to a
-  specific CPU set. This means that the process or the thread will never run on
-  other CPUs. The "cpu-map" directive specifies CPU sets for process or thread
-  sets. The first argument is a process set, eventually followed by a thread
-  set. These sets have the format
+cluster-secret <secret>
+  Define an ASCII string secret shared between several nodes belonging to the
+  same cluster. It could be used for different usages. It is at least used to
+  derive stateless reset tokens for all the QUIC connections instantiated by
+  this process. This is also the case to derive secrets used to encrypt Retry
+  tokens. If you do not set this parameter, the stateless reset and Retry QUIC
+  features will be both silently disabled.
+
+cpu-map [auto:]<thread-group>[/<thread-set>] <cpu-set>...
+  On some operating systems, it is possible to bind a thread group or a thread
+  to a specific CPU set. This means that the designated threads will never run
+  on other CPUs. The "cpu-map" directive specifies CPU sets for individual
+  threads or thread groups. The first argument is a thread group range,
+  optionally followed by a thread set. These ranges have the following format:
 
       all | odd | even | number[-[number]]
 
@@ -1339,6 +1373,13 @@ default-path { current | config | parent | origin <path> }
   paths. A robust approach could consist in prefixing all files names with
   their respective site name, or in doing so at the directory level.
 
+description <text>
+  Add a text that describes the instance.
+
+  Please note that it is required to escape certain characters (# for example)
+  and this text is inserted into a html page so you should avoid using
+  "<" and ">" characters.
+
 deviceatlas-json-file <path>
   Sets the path of the DeviceAtlas JSON data file to be loaded by the API.
   The path must be a valid JSON data file and accessible by HAProxy process.
@@ -1347,14 +1388,14 @@ deviceatlas-log-level <value>
   Sets the level of information returned by the API. This directive is
   optional and set to 0 by default if not set.
 
-deviceatlas-separator <char>
-  Sets the character separator for the API properties results. This directive
-  is optional and set to | by default if not set.
-
 deviceatlas-properties-cookie <name>
   Sets the client cookie's name used for the detection if the DeviceAtlas
   Client-side component was used during the request. This directive is optional
   and set to DAPROPS by default if not set.
+
+deviceatlas-separator <char>
+  Sets the character separator for the API properties results. This directive
+  is optional and set to | by default if not set.
 
 expose-experimental-directives
   This statement must appear before using directives tagged as experimental or
@@ -1447,24 +1488,6 @@ group <group name>
   Similar to "gid" but uses the GID of group name <group name> from /etc/group.
   See also "gid" and "user".
 
-hard-stop-after <time>
-  Defines the maximum time allowed to perform a clean soft-stop.
-
-  Arguments :
-    <time>  is the maximum time (by default in milliseconds) for which the
-            instance will remain alive when a soft-stop is received via the
-            SIGUSR1 signal.
-
-  This may be used to ensure that the instance will quit even if connections
-  remain opened during a soft-stop (for example with long timeouts for a proxy
-  in tcp mode). It applies both in TCP and HTTP mode.
-
-  Example:
-    global
-      hard-stop-after 30s
-
-  See also: grace
-
 h1-accept-payload-with-any-method
   Does not reject HTTP/1.0 GET/HEAD/DELETE requests with a payload.
 
@@ -1528,6 +1551,48 @@ h1-case-adjust-file <hdrs-file>
   See "h1-case-adjust", "option h1-case-adjust-bogus-client" and
   "option h1-case-adjust-bogus-server".
 
+h2-workaround-bogus-websocket-clients
+  This disables the announcement of the support for h2 websockets to clients.
+  This can be use to overcome clients which have issues when implementing the
+  relatively fresh RFC8441, such as Firefox 88. To allow clients to
+  automatically downgrade to http/1.1 for the websocket tunnel, specify h2
+  support on the bind line using "alpn" without an explicit "proto" keyword. If
+  this statement was previously activated, this can be disabled by prefixing
+  the keyword with "no'.
+
+hard-stop-after <time>
+  Defines the maximum time allowed to perform a clean soft-stop.
+
+  Arguments :
+    <time>  is the maximum time (by default in milliseconds) for which the
+            instance will remain alive when a soft-stop is received via the
+            SIGUSR1 signal.
+
+  This may be used to ensure that the instance will quit even if connections
+  remain opened during a soft-stop (for example with long timeouts for a proxy
+  in tcp mode). It applies both in TCP and HTTP mode.
+
+  Example:
+    global
+      hard-stop-after 30s
+
+  See also: grace
+
+httpclient.resolvers.id <resolvers id>
+  This option defines the resolvers section with which the httpclient will try
+  to resolve.
+
+  Default option is the "default" resolvers ID. By default, if this option is
+  not used, it will simply disable the resolving if the section is not found.
+
+  However, when this option is explicitly enabled it will trigger a
+  configuration error if it fails to load.
+
+httpclient.resolvers.prefer <ipv4|ipv6>
+  This option allows to chose which family of IP you want when resolving,
+  which is convenient when IPv6 is not available on your network. Default
+  option is "ipv6".
+
 httpclient.ssl.ca-file <cafile>
   This option defines the ca-file which should be used to verify the server
   certificate. It takes the same parameters as the "ca-file" option on the
@@ -1549,21 +1614,6 @@ httpclient.ssl.verify [none|required]
 
   However, when this option is explicitly enabled it will trigger a
   configuration error if it fails.
-
-httpclient.resolvers.id <resolvers id>
-  This option defines the resolvers section with which the httpclient will try
-  to resolve.
-
-  Default option is the "default" resolvers ID. By default, if this option is
-  not used, it will simply disable the resolving if the section is not found.
-
-  However, when this option is explicitly enabled it will trigger a
-  configuration error if it fails to load.
-
-httpclient.resolvers.prefer <ipv4|ipv6>
-  This option allows to chose which family of IP you want when resolving,
-  which is convenient when IPv6 is not available on your network. Default
-  option is "ipv6".
 
 insecure-fork-wanted
   By default HAProxy tries hard to prevent any thread and process creation
@@ -1611,15 +1661,6 @@ issuers-chain-path <dir>
   chain if a file with IntermediateCA2+IntermediateCA1 is present in
   "issuers-chain-path" directory. All other certificates with the same issuer
   will share the chain in memory.
-
-h2-workaround-bogus-websocket-clients
-  This disables the announcement of the support for h2 websockets to clients.
-  This can be use to overcome clients which have issues when implementing the
-  relatively fresh RFC8441, such as Firefox 88. To allow clients to
-  automatically downgrade to http/1.1 for the websocket tunnel, specify h2
-  support on the bind line using "alpn" without an explicit "proto" keyword. If
-  this statement was previously activated, this can be disabled by prefixing
-  the keyword with "no'.
 
 localpeer <name>
   Sets the local instance's peer name. It will be ignored if the "-L"
@@ -1931,6 +1972,26 @@ server-state-file <file>
   configuration. See also "server-state-base" and "show servers state",
   "load-server-state-from-file" and "server-state-file-name"
 
+set-dumpable
+  This option is better left disabled by default and enabled only upon a
+  developer's request. If it has been enabled, it may still be forcibly
+  disabled by prefixing it with the "no" keyword. It has no impact on
+  performance nor stability but will try hard to re-enable core dumps that were
+  possibly disabled by file size limitations (ulimit -f), core size limitations
+  (ulimit -c), or "dumpability" of a process after changing its UID/GID (such
+  as /proc/sys/fs/suid_dumpable on Linux). Core dumps might still be limited by
+  the current directory's permissions (check what directory the file is started
+  from), the chroot directory's permission (it may be needed to temporarily
+  disable the chroot directive or to move it to a dedicated writable location),
+  or any other system-specific constraint. For example, some Linux flavours are
+  notorious for replacing the default core file with a path to an executable
+  not even installed on the system (check /proc/sys/kernel/core_pattern). Often,
+  simply writing "core", "core.%p" or "/var/log/core/core.%p" addresses the
+  issue. When trying to enable this option waiting for a rare issue to
+  re-appear, it's often a good idea to first try to obtain such a dump by
+  issuing, for example, "kill -11" to the "haproxy" process and verify that it
+  leaves a core where expected when dying.
+
 set-var <var-name> <expr>
   Sets the process-wide variable '<var-name>' to the result of the evaluation
   of the sample expression <expr>. The variable '<var-name>' may only be a
@@ -1970,26 +2031,6 @@ setenv <name> <value>
   is overwritten. The changes immediately take effect so that the next line in
   the configuration file sees the new value. See also "presetenv", "resetenv",
   and "unsetenv".
-
-set-dumpable
-  This option is better left disabled by default and enabled only upon a
-  developer's request. If it has been enabled, it may still be forcibly
-  disabled by prefixing it with the "no" keyword. It has no impact on
-  performance nor stability but will try hard to re-enable core dumps that were
-  possibly disabled by file size limitations (ulimit -f), core size limitations
-  (ulimit -c), or "dumpability" of a process after changing its UID/GID (such
-  as /proc/sys/fs/suid_dumpable on Linux). Core dumps might still be limited by
-  the current directory's permissions (check what directory the file is started
-  from), the chroot directory's permission (it may be needed to temporarily
-  disable the chroot directive or to move it to a dedicated writable location),
-  or any other system-specific constraint. For example, some Linux flavours are
-  notorious for replacing the default core file with a path to an executable
-  not even installed on the system (check /proc/sys/kernel/core_pattern). Often,
-  simply writing "core", "core.%p" or "/var/log/core/core.%p" addresses the
-  issue. When trying to enable this option waiting for a rare issue to
-  re-appear, it's often a good idea to first try to obtain such a dump by
-  issuing, for example, "kill -11" to the "haproxy" process and verify that it
-  leaves a core where expected when dying.
 
 ssl-default-bind-ciphers <ciphers>
   This setting is only available when support for OpenSSL was built in. It sets
@@ -2224,6 +2265,10 @@ ssl-skip-self-issued-ca
   certificates. It's useless for BoringSSL, .issuer is ignored because ocsp
   bits does not need it. Requires at least OpenSSL 1.0.2.
 
+stats maxconn <connections>
+  By default, the stats socket is limited to 10 concurrent connections. It is
+  possible to change this value with "stats maxconn".
+
 stats socket [<address:port>|<path>] [param*]
   Binds a UNIX socket to <path> or a TCPv4/v6 address to <address:port>.
   Connections to this socket will return various statistics outputs and even
@@ -2240,9 +2285,12 @@ stats timeout <timeout, in milliseconds>
   to change this value with "stats timeout". The value must be passed in
   milliseconds, or be suffixed by a time unit among { us, ms, s, m, h, d }.
 
-stats maxconn <connections>
-  By default, the stats socket is limited to 10 concurrent connections. It is
-  possible to change this value with "stats maxconn".
+strict-limits
+  Makes process fail at startup when a setrlimit fails. HAProxy tries to set the
+  best setrlimit according to what has been calculated. If it fails, it will
+  emit a warning. This option is here to guarantee an explicit failure of
+  HAProxy when those limits fail. It is enabled by default. It may still be
+  forcibly disabled by prefixing it with the "no" keyword.
 
 thread-group <group> [<thread-range>...]
   This setting is only available when support for threads was built in. It
@@ -2313,42 +2361,14 @@ node <name>
   nodes, it becomes easy to immediately spot what server is handling the
   traffic.
 
-description <text>
-  Add a text that describes the instance.
+wurfl-cache-size <size>
+  Sets the WURFL Useragent cache size. For faster lookups, already processed user
+  agents are kept in a LRU cache :
+  - "0"     : no cache is used.
+  - <size>  : size of lru cache in elements.
 
-  Please note that it is required to escape certain characters (# for example)
-  and this text is inserted into a html page so you should avoid using
-  "<" and ">" characters.
-
-51degrees-data-file <file path>
-  The path of the 51Degrees data file to provide device detection services. The
-  file should be unzipped and accessible by HAProxy with relevant permissions.
-
-  Please note that this option is only available when HAProxy has been
-  compiled with USE_51DEGREES.
-
-51degrees-property-name-list [<string> ...]
-  A list of 51Degrees property names to be load from the dataset. A full list
-  of names is available on the 51Degrees website:
-  https://51degrees.com/resources/property-dictionary
-
-  Please note that this option is only available when HAProxy has been
-  compiled with USE_51DEGREES.
-
-51degrees-property-separator <char>
-  A char that will be appended to every property value in a response header
-  containing 51Degrees results. If not set that will be set as ','.
-
-  Please note that this option is only available when HAProxy has been
-  compiled with USE_51DEGREES.
-
-51degrees-cache-size <number>
-  Sets the size of the 51Degrees converter cache to <number> entries. This
-  is an LRU cache which reminds previous device detections and their results.
-  By default, this cache is disabled.
-
-  Please note that this option is only available when HAProxy has been
-  compiled with USE_51DEGREES.
+  Please note that this option is only available when HAProxy has been compiled
+  with USE_WURFL=1.
 
 wurfl-data-file <file path>
   The path of the WURFL data file to provide device detection services. The
@@ -2404,22 +2424,6 @@ wurfl-patch-file [<file path>]
   Please note that this option is only available when HAProxy has been compiled
   with USE_WURFL=1.
 
-wurfl-cache-size <size>
-  Sets the WURFL Useragent cache size. For faster lookups, already processed user
-  agents are kept in a LRU cache :
-  - "0"     : no cache is used.
-  - <size>  : size of lru cache in elements.
-
-  Please note that this option is only available when HAProxy has been compiled
-  with USE_WURFL=1.
-
-strict-limits
-  Makes process fail at startup when a setrlimit fails. HAProxy tries to set the
-  best setrlimit according to what has been calculated. If it fails, it will
-  emit a warning. This option is here to guarantee an explicit failure of
-  HAProxy when those limits fail. It is enabled by default. It may still be
-  forcibly disabled by prefixing it with the "no" keyword.
-
 3.2. Performance tuning
 -----------------------
 
@@ -2456,6 +2460,24 @@ max-spread-checks <delay in milliseconds>
   even if the servers' check intervals are larger. When servers run with
   shorter intervals, their intervals will be respected though.
 
+maxcompcpuusage <number>
+  Sets the maximum CPU usage HAProxy can reach before stopping the compression
+  for new requests or decreasing the compression level of current requests.
+  It works like 'maxcomprate' but measures CPU usage instead of incoming data
+  bandwidth. The value is expressed in percent of the CPU used by HAProxy. A
+  value of 100 disable the limit. The default value is 100. Setting a lower
+  value will prevent the compression work from slowing the whole process down
+  and from introducing high latencies.
+
+maxcomprate <number>
+  Sets the maximum per-process input compression rate to <number> kilobytes
+  per second. For each session, if the maximum is reached, the compression
+  level will be decreased during the session. If the maximum is reached at the
+  beginning of a session, the session will not compress at all. If the maximum
+  is not reached, the compression level will be increased up to
+  tune.comp.maxlevel. A value of zero means there is no limit, this is the
+  default value.
+
 maxconn <number>
   Sets the maximum per-process number of concurrent connections to <number>. It
   is equivalent to the command-line argument "-n". Proxies will stop accepting
@@ -2482,24 +2504,6 @@ maxconnrate <number>
   limit is reached, so it's a good idea to also limit each frontend to some
   value close to its expected share. Also, lowering tune.maxaccept can improve
   fairness.
-
-maxcomprate <number>
-  Sets the maximum per-process input compression rate to <number> kilobytes
-  per second. For each session, if the maximum is reached, the compression
-  level will be decreased during the session. If the maximum is reached at the
-  beginning of a session, the session will not compress at all. If the maximum
-  is not reached, the compression level will be increased up to
-  tune.comp.maxlevel. A value of zero means there is no limit, this is the
-  default value.
-
-maxcompcpuusage <number>
-  Sets the maximum CPU usage HAProxy can reach before stopping the compression
-  for new requests or decreasing the compression level of current requests.
-  It works like 'maxcomprate' but measures CPU usage instead of incoming data
-  bandwidth. The value is expressed in percent of the CPU used by HAProxy. A
-  value of 100 disable the limit. The default value is 100. Setting a lower
-  value will prevent the compression work from slowing the whole process down
-  and from introducing high latencies.
 
 maxpipes <number>
   Sets the maximum per-process number of pipes to <number>. Currently, pipes
@@ -2576,16 +2580,20 @@ noepoll
   equivalent to the command-line argument "-de". The next polling system
   used will generally be "poll". See also "nopoll".
 
-nokqueue
-  Disables the use of the "kqueue" event polling system on BSD. It is
-  equivalent to the command-line argument "-dk". The next polling system
-  used will generally be "poll". See also "nopoll".
-
 noevports
   Disables the use of the event ports event polling system on SunOS systems
   derived from Solaris 10 and later. It is equivalent to the command-line
   argument "-dv". The next polling system used will generally be "poll". See
   also "nopoll".
+
+nogetaddrinfo
+  Disables the use of getaddrinfo(3) for name resolving. It is equivalent to
+  the command line argument "-dG". Deprecated gethostbyname(3) will be used.
+
+nokqueue
+  Disables the use of the "kqueue" event polling system on BSD. It is
+  equivalent to the command-line argument "-dk". The next polling system
+  used will generally be "poll". See also "nopoll".
 
 nopoll
   Disables the use of the "poll" event polling system. It is equivalent to the
@@ -2593,6 +2601,10 @@ nopoll
   It should never be needed to disable "poll" since it's available on all
   platforms supported by HAProxy. See also "nokqueue", "noepoll" and
   "noevports".
+
+noreuseport
+  Disables the use of SO_REUSEPORT - see socket(7). It is equivalent to the
+  command line argument "-dR".
 
 nosplice
   Disables the use of kernel tcp splicing between sockets on Linux. It is
@@ -2603,14 +2615,6 @@ nosplice
   be used. This option makes it easier to globally disable kernel splicing in
   case of doubt. See also "option splice-auto", "option splice-request" and
   "option splice-response".
-
-nogetaddrinfo
-  Disables the use of getaddrinfo(3) for name resolving. It is equivalent to
-  the command line argument "-dG". Deprecated gethostbyname(3) will be used.
-
-noreuseport
-  Disables the use of SO_REUSEPORT - see socket(7). It is equivalent to the
-  command line argument "-dR".
 
 profiling.memory { on | off }
   Enables ('on') or disables ('off') per-function memory profiling. This will
@@ -2854,17 +2858,17 @@ tune.lua.session-timeout <timeout>
   counts only the pure Lua runtime. If the Lua does a sleep, the sleep is
   not taken in account. The default timeout is 4s.
 
-tune.lua.task-timeout <timeout>
-  Purpose is the same as "tune.lua.session-timeout", but this timeout is
-  dedicated to the tasks. By default, this timeout isn't set because a task may
-  remain alive during of the lifetime of HAProxy. For example, a task used to
-  check servers.
-
 tune.lua.service-timeout <timeout>
   This is the execution timeout for the Lua services. This is useful for
   preventing infinite loops or spending too much time in Lua. This timeout
   counts only the pure Lua runtime. If the Lua does a sleep, the sleep is
   not taken in account. The default timeout is 4s.
+
+tune.lua.task-timeout <timeout>
+  Purpose is the same as "tune.lua.session-timeout", but this timeout is
+  dedicated to the tasks. By default, this timeout isn't set because a task may
+  remain alive during of the lifetime of HAProxy. For example, a task used to
+  check servers.
 
 tune.maxaccept <number>
   Sets the maximum number of consecutive connections a process may accept in a
@@ -3067,6 +3071,27 @@ tune.ssl.cachesize <number>
   pre-allocated upon startup. Setting this value to 0 disables the SSL session
   cache.
 
+tune.ssl.capture-buffer-size <number>
+tune.ssl.capture-cipherlist-size <number> (deprecated)
+  Sets the maximum size of the buffer used for capturing client hello cipher
+  list, extensions list, elliptic curves list and elliptic curve point
+  formats. If the value is 0 (default value) the capture is disabled,
+  otherwise a buffer is allocated for each SSL/TLS connection.
+
+tune.ssl.default-dh-param <number>
+  Sets the maximum size of the Diffie-Hellman parameters used for generating
+  the ephemeral/temporary Diffie-Hellman key in case of DHE key exchange. The
+  final size will try to match the size of the server's RSA (or DSA) key (e.g,
+  a 2048 bits temporary DH key for a 2048 bits RSA key), but will not exceed
+  this maximum value. Only 1024 or higher values are allowed. Higher values
+  will increase the CPU load, and values greater than 1024 bits are not
+  supported by Java 7 and earlier clients. This value is not used if static
+  Diffie-Hellman parameters are supplied either directly in the certificate
+  file or by using the ssl-dh-param-file parameter.
+  If there is neither a default-dh-param nor a ssl-dh-param-file defined, and
+  if the server's PEM file of a given frontend does not specify its own DH
+  parameters, then DHE ciphers will be unavailable for this frontend.
+
 tune.ssl.force-private-cache
   This option disables SSL session cache sharing between all processes. It
   should normally not be used since it will force many renegotiations due to
@@ -3142,32 +3167,11 @@ tune.ssl.maxrecord <number>
   switch to this setting after an idle stream has been detected (see
   tune.idletimer above). See also tune.ssl.hard-maxrecord.
 
-tune.ssl.default-dh-param <number>
-  Sets the maximum size of the Diffie-Hellman parameters used for generating
-  the ephemeral/temporary Diffie-Hellman key in case of DHE key exchange. The
-  final size will try to match the size of the server's RSA (or DSA) key (e.g,
-  a 2048 bits temporary DH key for a 2048 bits RSA key), but will not exceed
-  this maximum value. Only 1024 or higher values are allowed. Higher values
-  will increase the CPU load, and values greater than 1024 bits are not
-  supported by Java 7 and earlier clients. This value is not used if static
-  Diffie-Hellman parameters are supplied either directly in the certificate
-  file or by using the ssl-dh-param-file parameter.
-  If there is neither a default-dh-param nor a ssl-dh-param-file defined, and
-  if the server's PEM file of a given frontend does not specify its own DH
-  parameters, then DHE ciphers will be unavailable for this frontend.
-
 tune.ssl.ssl-ctx-cache-size <number>
   Sets the size of the cache used to store generated certificates to <number>
   entries. This is a LRU cache. Because generating a SSL certificate
   dynamically is expensive, they are cached. The default cache size is set to
   1000 entries.
-
-tune.ssl.capture-buffer-size <number>
-tune.ssl.capture-cipherlist-size <number> (deprecated)
-  Sets the maximum size of the buffer used for capturing client hello cipher
-  list, extensions list, elliptic curves list and elliptic curve point
-  formats. If the value is 0 (default value) the capture is disabled,
-  otherwise a buffer is allocated for each SSL/TLS connection.
 
 tune.vars.global-max-size <size>
 tune.vars.proc-max-size <size>
@@ -3995,7 +3999,7 @@ http-error                                X          X         X         X
 http-request                              X (!)      X         X         X
 http-response                             X (!)      X         X         X
 http-reuse                                X          -         X         X
-http-send-name-header                     -          -         X         X
+http-send-name-header                     X          -         X         X
 id                                        -          X         X         X
 ignore-persist                            -          -         X         X
 load-server-state-from-file               X          -         X         X
@@ -4053,7 +4057,7 @@ option socket-stats                  (*)  X          X         X         -
 option splice-auto                   (*)  X          X         X         X
 option splice-request                (*)  X          X         X         X
 option splice-response               (*)  X          X         X         X
-option spop-check                         -          -         -         X
+option spop-check                         X          -         X         X
 option srvtcpka                      (*)  X          -         X         X
 option ssl-hello-chk                      X          -         X         X
 -- keyword -------------------------- defaults - frontend - listen -- backend -
@@ -4494,10 +4498,16 @@ bind /<path> [, ...] [param*]
                       connected unix socket or of a socketpair. The bind waits
                       to receive a FD over the unix socket and uses it as if it
                       was the FD of an accept(). Should be used carefully.
-                    - 'quicv4@' -> address is resolved as IPv4 and protocol
-                      UDP is used.
-                    - 'quicv6@' -> address is resolved as IPv6 and protocol
-                      UDP is used.
+                    - 'quic4@' -> address is resolved as IPv4 and protocol UDP
+                      is used. Note that QUIC connections attached to a
+                      listener will be multiplexed over the listener socket.
+                      With a large traffic this has a noticeable impact on
+                      performance and CPU consumption. To improve this, you
+                      should duplicate QUIC listener instances over several
+                      threads, for example using "shards" keyword.
+                    - 'quic6@' -> address is resolved as IPv6 and protocol UDP
+                      is used. The performance note for QUIC over IPv4 applies
+                      as well.
 
                   You may want to reference some environment variables in the
                   address parameter, see section 2.3 about environment
@@ -4562,7 +4572,7 @@ bind /<path> [, ...] [param*]
             bind "fd@${FD_APP1}"
 
         listen h3_quic_proxy
-            bind quic@10.0.0.1:8888 ssl crt /etc/mycrt alpn h3
+            bind quic4@10.0.0.1:8888 ssl crt /etc/mycrt alpn h3
 
   Note: regarding Linux's abstract namespace sockets, HAProxy uses the whole
         sun_path length is used for the address length. Some other programs
@@ -5697,16 +5707,16 @@ http-after-response add-header <name> <fmt> [ { if | unless } <condition> ]
   value is defined by <fmt>. Please refer to "http-request add-header" for a
   complete description.
 
+http-after-response allow [ { if | unless } <condition> ]
+
+  This stops the evaluation of the rules and lets the response pass the check.
+  No further "http-after-response" rules are evaluated for the current section.
+
 http-after-response capture <sample> id <id> [ { if | unless } <condition> ]
 
   This captures sample expression <sample> from the response buffer, and
   converts it to a string. Please refer to "http-response capture" for a
   complete description.
-
-http-after-response allow [ { if | unless } <condition> ]
-
-  This stops the evaluation of the rules and lets the response pass the check.
-  No further "http-after-response" rules are evaluated for the current section.
 
 http-after-response del-header <name> [ -m <meth> ] [ { if | unless } <condition> ]
 
@@ -7278,9 +7288,11 @@ http-request set-uri <fmt> [ { if | unless } <condition> ]
 
   This rewrites the request URI with the result of the evaluation of format
   string <fmt>. The scheme, authority, path and query string are all replaced
-  at once. This can be used to rewrite hosts in front of proxies, or to
-  perform complex modifications to the URI such as moving parts between the
-  path and the query string.
+  at once. This can be used to rewrite hosts in front of proxies, or to perform
+  complex modifications to the URI such as moving parts between the path and
+  the query string. If an absolute URI is set, it will be sent as is to
+  HTTP/1.1 servers. If it is not the desired behavior, the host, the path
+  and/or the query string should be set separately.
   See also "http-request set-path" and "http-request set-query".
 
 http-request set-var(<var-name>[,<cond> ...]) <expr> [ { if | unless } <condition> ]
@@ -7695,8 +7707,6 @@ http-response sc-set-gpt(<idx>,<sc-id>) { <int> | <expr> }
                                         [ { if | unless } <condition> ]
 http-response sc-set-gpt0(<sc-id>) { <int> | <expr> }
                                    [ { if | unless } <condition> ]
-http-response sc-set-gpt0(<sc-id>) { <int> | <expr> }
-                                   [ { if | unless } <condition> ]
 
   These actions set the 32-bit unsigned General Purpose Tags according to the
   sticky counter designated by <sc-id>. Please refer to "http-request
@@ -7873,7 +7883,26 @@ http-reuse { never | safe | aggressive | always }
   because almost no new connection will be established while idle connections
   remain available. This is particularly true with the "always" strategy.
 
-  See also : "option http-keep-alive", "server maxconn"
+  The rules to decide to keep an idle connection opened or to close it after
+  processing are also governed by the "tune.pool-low-fd-ratio" (default: 20%)
+  and "tune.pool-high-fd-ratio" (default: 25%). These correspond to the
+  percentage of total file descriptors spent in idle connections above which
+  haproxy will respectively refrain from keeping a connection opened after a
+  response, and actively kill idle connections. Some setups using a very high
+  ratio of idle connections, either because of too low a global "maxconn", or
+  due to a lot of HTTP/2 or HTTP/3 traffic on the frontend (few connections)
+  but HTTP/1 connections on the backend, may observe a lower reuse rate because
+  too few connections are kept open. It may be desirable in this case to adjust
+  such thresholds or simply to increase the global "maxconn" value.
+
+  Similarly, when thread groups are explicitly enabled, it is important to
+  understand that idle connections are only usable between threads from a same
+  group. As such it may happen that unfair load between groups leads to more
+  idle connections being needed, causing a lower reuse rate. The same solution
+  may then be applied (increase global "maxconn" or increase pool ratios).
+
+  See also : "option http-keep-alive", "server maxconn", "thread-groups",
+             "tune.pool-high-fd-ratio", "tune.pool-low-fd-ratio"
 
 
 http-send-name-header [<header>]
@@ -8407,7 +8436,9 @@ monitor-uri <uri>
   Monitor requests are processed very early, just after the request is parsed
   and even before any "http-request". The only rulesets applied before are the
   tcp-request ones. They cannot be logged either, and it is the intended
-  purpose. They are only used to report HAProxy's health to an upper component,
+  purpose. Only one URI may be configured for monitoring; when multiple
+  "monitor-uri" statements are present, the last one will define the URI to
+  be used. They are only used to report HAProxy's health to an upper component,
   nothing more. However, it is possible to add any number of conditions using
   "monitor fail" and ACLs so that the result can be adjusted to whatever check
   can be imagined (most often the number of available servers in a backend).
@@ -9931,7 +9962,7 @@ no option splice-response
 option spop-check
   Use SPOP health checks for server testing
   May be used in sections :   defaults | frontend | listen | backend
-                                 no    |    no    |   no   |   yes
+                                 yes   |    no    |   yes  |   yes
   Arguments : none
 
   It is possible to test that the server correctly talks SPOP protocol instead
@@ -10515,24 +10546,26 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
 
 
 retries <value>
-  Set the number of retries to perform on a server after a connection failure
+  Set the number of retries to perform on a server after a failure
   May be used in sections:    defaults | frontend | listen | backend
                                  yes   |    no    |   yes  |   yes
   Arguments :
-    <value>   is the number of times a connection attempt should be retried on
-              a server when a connection either is refused or times out. The
-              default value is 3.
+    <value>   is the number of times a request or connection attempt should be
+              retried on a server after a failure.
 
-  It is important to understand that this value applies to the number of
-  connection attempts, not full requests. When a connection has effectively
-  been established to a server, there will be no more retry.
+  By default, retries apply only to new connection attempts. However, when
+  the "retry-on" directive is used, other conditions might trigger a retry
+  (e.g. empty response, undesired status code), and each of them will count
+  one attempt, and when the total number attempts reaches the value here, an
+  error will be returned.
 
   In order to avoid immediate reconnections to a server which is restarting,
   a turn-around timer of min("timeout connect", one second) is applied before
-  a retry occurs.
+  a retry occurs on the same server.
 
-  When "option redispatch" is set, the last retry may be performed on another
-  server even if a cookie references a different server.
+  When "option redispatch" is set, some retries may be performed on another
+  server even if a cookie references a different server. By default this will
+  only be the last retry unless an argument is passed to "option redispatch".
 
   See also : "option redispatch"
 
@@ -14495,9 +14528,10 @@ quic-force-retry
   contains a token. This token must be sent back to the Retry packet sender,
   this latter being the only one to be able to validate the token. Note that QUIC
   Retry will always be used even if a Retry threshold was set (see
-  "tune.quic.retry-threshold" setting). To be functional this setting needs a
-  cluster secret to be set, if not it will be silently ignored (see "cluster-secret"
-  setting).
+  "tune.quic.retry-threshold" setting).
+
+  This setting requires the cluster secret to be set or else an error will be
+  reported on startup (see "cluster-secret").
 
   See https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.2 for more
   information about QUIC retry.
@@ -15627,8 +15661,10 @@ sni <expression>
   The "sni" parameter evaluates the sample fetch expression, converts it to a
   string and uses the result as the host name sent in the SNI TLS extension to
   the server. A typical use case is to send the SNI received from the client in
-  a bridged HTTPS scenario, using the "ssl_fc_sni" sample fetch for the
-  expression, though alternatives such as req.hdr(host) can also make sense. If
+  a bridged TCP/SSL scenario, using the "ssl_fc_sni" sample fetch for the
+  expression. THIS MUST NOT BE USED FOR HTTPS, where req.hdr(host) should be
+  used instead, since SNI in HTTPS must always match the Host field and clients
+  are allowed to use different host names over the same connection). If
   "verify required" is set (which is the recommended setting), the resulting
   name will also be matched against the server certificate's names. See the
   "verify" directive for more details. If you want to set a SNI for health
@@ -16325,7 +16361,11 @@ possible to convert the sample to lowercase before matching, like this :
 All ACL-specific criteria imply a default matching method. Most often, these
 criteria are composed by concatenating the name of the original sample fetch
 method and the matching method. For example, "hdr_beg" applies the "beg" match
-to samples retrieved using the "hdr" fetch method. Since all ACL-specific
+to samples retrieved using the "hdr" fetch method. This matching method is only
+usable when the keyword is used alone, without any converter. In case any such
+converter were to be applied after such an ACL keyword, the default matching
+method from the ACL keyword is simply ignored since what will matter for the
+matching is the output type of the last converter. Since all ACL-specific
 criteria rely on a sample fetch method, it is always possible instead to use
 the original sample fetch method and the explicit matching method using "-m".
 
@@ -16451,13 +16491,24 @@ different forms :
   - suffix match    (-m end) : the patterns are compared with the end of the
     extracted string, and the ACL matches if any of them matches.
 
-  - subdir match    (-m dir) : the patterns are looked up inside the extracted
-    string, delimited with slashes ("/"), and the ACL matches if any of them
-    matches.
+  - subdir match    (-m dir) : the patterns are looked up anywhere inside the
+    extracted string, delimited with slashes ("/"), the beginning or the end
+    of the string. The ACL matches if any of them matches. As such, the string
+    "/images/png/logo/32x32.png", would match "/images", "/images/png",
+    "images/png", "/png/logo", "logo/32x32.png" or "32x32.png" but not "png"
+    nor "32x32".
 
-  - domain match    (-m dom) : the patterns are looked up inside the extracted
-    string, delimited with dots ("."), and the ACL matches if any of them
-    matches.
+  - domain match    (-m dom) : the patterns are looked up anywhere inside the
+    extracted string, delimited with dots ("."), colons (":"), slashes ("/"),
+    question marks ("?"), the beginning or the end of the string. This is made
+    to be used with URLs. Leading and trailing delimiters in the pattern are
+    ignored. The ACL matches if any of them matches. As such, in the example
+    string "http://www1.dc-eu.example.com:80/blah", the patterns "http",
+    "www1", ".www1", "dc-eu", "example", "com", "80", "dc-eu.example",
+    "blah", ":www1:", "dc-eu.example:80" would match, but not "eu" nor "dc".
+    Using it to match domain suffixes for filtering or routing is generally
+    not a good idea, as the routing could easily be fooled by prepending the
+    matching prefix in front of another domain for example.
 
 String matching applies to verbatim strings as they are passed, with the
 exception of the backslash ("\") which makes it possible to escape some
@@ -16732,7 +16783,8 @@ add_item(<delim>,[<var>][,<suff>]])
   sample string is empty before adding a delimiter. If commas or closing
   parenthesis are needed as delimiters, they must be protected by quotes or
   backslashes, themselves protected so that they are not stripped by the first
-  level parser. See examples below.
+  level parser (please see section 2.2 for quoting and escaping). See examples
+  below.
 
   Example:
     http-request set-var(req.tagged) 'var(req.tagged),add_item(",",req.score1,"(site1)") if src,in_table(site1)'
@@ -17843,7 +17895,7 @@ table_http_req_rate(<table>)
   period configured in the table. See also the sc_http_req_rate sample fetch
   keyword.
 
-table_idle(<table>)
+table_idle(<table>[,<default_value>])
   Uses the input sample to perform a look up in the specified table. If the key
   is not found in the table, the converter fails except if <default_value> is
   set: this makes the converter succeed and return <default_value>. If the key
@@ -20076,6 +20128,16 @@ ssl_fc_sni : string
   forwarded. See also "ssl_fc_sni_end" and "ssl_fc_sni_reg" below. This
   requires that the SSL library is built with support for TLS extensions
   enabled (check haproxy -vv).
+
+  CAUTION! Except under very specific conditions, it is normally not correct to
+  use this field as a substitute for the HTTP "Host" header field. For example,
+  when forwarding an HTTPS connection to a server, the SNI field must be set
+  from the HTTP Host header field using "req.hdr(host)" and not from the front
+  SNI value. The reason is that SNI is solely used to select the certificate
+  the server side will present, and that clients are then allowed to send
+  requests with different Host values as long as they match the names in the
+  certificate. As such, "ssl_fc_sni" should normally not be used as an argument
+  to the "sni" server keyword, unless the backend works in TCP mode.
 
   ACL derivatives :
     ssl_fc_sni_end : suffix match
@@ -23479,8 +23541,8 @@ Optionally, a prefix could be used to force the address family and/or the
 socket type and the transport method.
 
 
-11.1 Address family prefixes
-----------------------------
+11.1. Address family prefixes
+-----------------------------
 
 'abns@<name>' following <name> is an abstract namespace (Linux only).
 
@@ -23515,8 +23577,8 @@ socket type and the transport method.
                start by slash '/'.
 
 
-11.2 Socket type prefixes
--------------------------
+11.2. Socket type prefixes
+--------------------------
 
 Previous "Address family prefixes" can also be prefixed to force the socket
 type and the transport method. The default depends of the statement using
@@ -23525,7 +23587,7 @@ This is the case for "log" statement where the default is syslog over UDP
 but we could force to use syslog over TCP.
 
 Those prefixes were designed for internal purpose and users should
-instead use aliases of the next section "11.5.3 Protocol prefixes".
+instead use aliases of the next section "11.3 Protocol prefixes".
 
 If users need one those prefixes to perform what they expect because
 they can not configure the same using the protocol prefixes, they should
@@ -23538,8 +23600,22 @@ report this to the maintainers.
                             to "datagram".
 
 
-11.3 Protocol prefixes
-----------------------
+11.3. Protocol prefixes
+-----------------------
+
+'quic4@<address>[:port1[-port2]]' following <address> is always considered as
+                                  an IPv4 address but socket type is forced to
+                                  "datagram" and the transport method is forced
+                                  to "stream". Depending on the statement using
+                                  this address, a UDP port or port range can or
+                                  must be specified.
+
+'quic6@<address>[:port1[-port2]]' following <address> is always considered as
+                                  an IPv6 address but socket type is forced to
+                                  "datagram" and the transport method is forced
+                                  to "stream". Depending on the statement using
+                                  this address, a UDP port or port range can or
+                                  must be specified.
 
 'tcp@<address>[:port1[-port2]]' following <address> is considered as an IPv4
                                 or IPv6 address depending of the syntax but
@@ -23576,14 +23652,14 @@ report this to the maintainers.
                                  method is forced to "datagram". Depending on
                                  the statement using this address, a port or
                                  port range can or must be specified.
-                                 It is considered as an alias of 'stream+ipv4@'.
+                                 It is considered as an alias of 'dgram+ipv4@'.
 
 'udp6@<address>[:port1[-port2]]' following <address> is always considered as
                                  an IPv6 address but socket type and transport
                                  method is forced to "datagram". Depending on
                                  the statement using this address, a port or
                                  port range can or must be specified.
-                                 It is considered as an alias of 'stream+ipv4@'.
+                                 It is considered as an alias of 'dgram+ipv4@'.
 
 'uxdg@<path>'    following string is considered as a unix socket <path> but
                  transport method is forced to "datagram". It is considered as

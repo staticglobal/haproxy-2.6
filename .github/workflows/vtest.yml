@@ -26,7 +26,7 @@ jobs:
       - uses: actions/checkout@v3
       - name: Generate Build Matrix
         id: set-matrix
-        run: python3 .github/matrix.py "${{ github.event_name }}"
+        run: python3 .github/matrix.py "${{ github.ref_name }}"
 
   # The Test job actually runs the tests.
   Test:
@@ -100,6 +100,9 @@ jobs:
       run: make -C addons/wurfl/dummy
     - name: Compile HAProxy with ${{ matrix.CC }}
       run: |
+        echo "::group::Show compiler's version"
+        echo | ${{ matrix.CC }} -v
+        echo "::endgroup::"
         echo "::group::Show platform specific defines"
         echo | ${{ matrix.CC }} -dM -xc -E -
         echo "::endgroup::"
@@ -133,7 +136,7 @@ jobs:
       run: |
         # This is required for macOS which does not actually allow to increase
         # the '-n' soft limit to the hard limit, thus failing to run.
-        ulimit -n 5000
+        ulimit -n 65536
         make reg-tests VTEST_PROGRAM=../vtest/vtest REGTESTS_TYPES=default,bug,devel
     - name: Show VTest results
       if: ${{ failure() && steps.vtest.outcome == 'failure' }}

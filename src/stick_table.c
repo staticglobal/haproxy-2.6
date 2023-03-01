@@ -224,7 +224,18 @@ int __stktable_trash_oldest(struct stktable *t, int to_batch)
 			ts->exp.key = ts->expire;
 			eb32_insert(&t->exps, &ts->exp);
 
-			if (!eb || eb->key > ts->exp.key)
+			/* the update might have jumped beyond the next element,
+			 * possibly causing a wrapping. We need to check whether
+			 * the next element should be used instead. If the next
+			 * element doesn't exist it means we're on the right
+			 * side and have to check the first one then. If it
+			 * exists and is closer, we must use it, otherwise we
+			 * use the current one.
+			 */
+			if (!eb)
+				eb = eb32_first(&t->exps);
+
+			if (!eb || tick_is_lt(ts->exp.key, eb->key))
 				eb = &ts->exp;
 
 			continue;
@@ -556,11 +567,12 @@ struct stksess *stktable_set_entry(struct stktable *table, struct stksess *nts)
 	return ts;
 }
 /*
- * Trash expired sticky sessions from table <t>. The next expiration date is
- * returned.
+ * Task processing function to trash expired sticky sessions. A pointer to the
+ * task itself is returned since it never dies.
  */
-static int stktable_trash_expired(struct stktable *t)
+struct task *process_table_expire(struct task *task, void *context, unsigned int state)
 {
+	struct stktable *t = context;
 	struct stksess *ts;
 	struct eb32_node *eb;
 	int looped = 0;
@@ -606,7 +618,18 @@ static int stktable_trash_expired(struct stktable *t)
 			ts->exp.key = ts->expire;
 			eb32_insert(&t->exps, &ts->exp);
 
-			if (!eb || eb->key > ts->exp.key)
+			/* the update might have jumped beyond the next element,
+			 * possibly causing a wrapping. We need to check whether
+			 * the next element should be used instead. If the next
+			 * element doesn't exist it means we're on the right
+			 * side and have to check the first one then. If it
+			 * exists and is closer, we must use it, otherwise we
+			 * use the current one.
+			 */
+			if (!eb)
+				eb = eb32_first(&t->exps);
+
+			if (!eb || tick_is_lt(ts->exp.key, eb->key))
 				eb = &ts->exp;
 			continue;
 		}
@@ -620,19 +643,8 @@ static int stktable_trash_expired(struct stktable *t)
 	/* We have found no task to expire in any tree */
 	t->exp_next = TICK_ETERNITY;
 out_unlock:
+	task->expire = t->exp_next;
 	HA_SPIN_UNLOCK(STK_TABLE_LOCK, &t->lock);
-	return t->exp_next;
-}
-
-/*
- * Task processing function to trash expired sticky sessions. A pointer to the
- * task itself is returned since it never dies.
- */
-struct task *process_table_expire(struct task *task, void *context, unsigned int state)
-{
-	struct stktable *t = context;
-
-	task->expire = stktable_trash_expired(t);
 	return task;
 }
 
@@ -2493,7 +2505,7 @@ static enum act_parse_ret parse_inc_gpc(const char **args, int *arg, struct prox
 	}
 	else {
 		/* default stick table id. */
-		memprintf(err, "invalid gpc ID '%s'. Expects sc-set-gpc(<GPC ID>,<Track ID>)", args[*arg-1]);
+		memprintf(err, "invalid gpc ID '%s'. Expects sc-inc-gpc(<GPC ID>,<Track ID>)", args[*arg-1]);
 		return ACT_RET_PRS_ERR;
 	}
 	rule->action = ACT_CUSTOM;

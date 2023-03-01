@@ -1698,7 +1698,6 @@ static inline int peer_send_teach_stage2_msgs(struct appctx *appctx, struct peer
 static int peer_treat_updatemsg(struct appctx *appctx, struct peer *p, int updt, int exp,
                                 char **msg_cur, char *msg_end, int msg_len, int totl)
 {
-	struct stconn *sc = appctx_sc(appctx);
 	struct shared_table *st = p->remote_table;
 	struct stksess *ts, *newts;
 	uint32_t update;
@@ -2036,14 +2035,10 @@ static int peer_treat_updatemsg(struct appctx *appctx, struct peer *p, int updt,
 
 	HA_RWLOCK_WRUNLOCK(STK_SESS_LOCK, &ts->lock);
 	stktable_touch_remote(st->table, ts, 1);
-	TRACE_LEAVE(PEERS_EV_UPDTMSG, NULL, p);
-	return 1;
 
  ignore_msg:
-	/* skip consumed message */
-	co_skip(sc_oc(sc), totl);
-	TRACE_DEVEL("leaving in error", PEERS_EV_UPDTMSG);
-	return 0;
+	TRACE_LEAVE(PEERS_EV_UPDTMSG, NULL, p);
+	return 1;
 
  malformed_unlock:
 	/* malformed message */
@@ -2150,7 +2145,6 @@ static inline int peer_treat_switchmsg(struct appctx *appctx, struct peer *p,
 static inline int peer_treat_definemsg(struct appctx *appctx, struct peer *p,
                                       char **msg_cur, char *msg_end, int totl)
 {
-	struct stconn *sc = appctx_sc(appctx);
 	int table_id_len;
 	struct shared_table *st;
 	int table_type;
@@ -2321,11 +2315,9 @@ static inline int peer_treat_definemsg(struct appctx *appctx, struct peer *p,
 
 	p->remote_table->remote_data = table_data;
 	p->remote_table->remote_id = table_id;
-	return 1;
 
  ignore_msg:
-	co_skip(sc_oc(sc), totl);
-	return 0;
+	return 1;
 
  malformed_exit:
 	/* malformed message */
@@ -3867,6 +3859,14 @@ static int peers_dump_peer(struct buffer *msg, struct appctx *appctx, struct pee
 	              peer->appctx->t ? peer->appctx->t->calls : 0);
 
 	peer_cs = appctx_sc(peer->appctx);
+	if (!peer_cs) {
+		/* the appctx might exist but not yet be initialized due to
+		 * deferred initialization used to balance applets across
+		 * threads.
+		 */
+		goto table_info;
+	}
+
 	peer_s = __sc_strm(peer_cs);
 
 	chunk_appendf(&trash, " state=%s", sc_state_str(sc_opposite(peer_cs)->state));

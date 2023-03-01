@@ -1181,7 +1181,12 @@ int ssl_store_load_ca_from_buf(struct cafile_entry *ca_e, char *cert_buf)
 	return retval;
 }
 
-int ssl_store_load_locations_file(char *path, int create_if_none, enum cafile_type type)
+/*
+ * Try to load a ca-file from disk into the ca-file cache.
+ *  <shuterror> allows you to to stop emitting the errors.
+ *  Return 0 upon error
+ */
+int __ssl_store_load_locations_file(char *path, int create_if_none, enum cafile_type type, int shuterror)
 {
 	X509_STORE *store = ssl_store_get0_locations_file(path);
 
@@ -1195,16 +1200,30 @@ int ssl_store_load_locations_file(char *path, int create_if_none, enum cafile_ty
 		struct cafile_entry *ca_e;
 		const char *file = NULL;
 		const char *dir = NULL;
+		unsigned long e;
 
 		store = X509_STORE_new();
+		if (!store) {
+			if (!shuterror)
+				ha_alert("Cannot allocate memory!\n");
+			goto err;
+		}
 
 		if (strcmp(path, "@system-ca") == 0) {
 			dir = X509_get_default_cert_dir();
+			if (!dir) {
+				if (!shuterror)
+					ha_alert("Couldn't get the system CA directory from X509_get_default_cert_dir().\n");
+				goto err;
+			}
 
 		} else {
 
-			if (stat(path, &buf))
+			if (stat(path, &buf) == -1) {
+				if (!shuterror)
+					ha_alert("Couldn't open the ca-file '%s' (%s).\n", path, strerror(errno));
 				goto err;
+			}
 
 			if (S_ISDIR(buf.st_mode))
 				dir = path;
@@ -1214,6 +1233,9 @@ int ssl_store_load_locations_file(char *path, int create_if_none, enum cafile_ty
 
 		if (file) {
 			if (!X509_STORE_load_locations(store, file, NULL)) {
+				e = ERR_get_error();
+				if (!shuterror)
+					ha_alert("Couldn't open the ca-file '%s' (%s).\n", path, ERR_reason_error_string(e));
 				goto err;
 			}
 		} else if (dir) {
@@ -1273,26 +1295,34 @@ int ssl_store_load_locations_file(char *path, int create_if_none, enum cafile_ty
 				continue;
 
 scandir_err:
+				e = ERR_get_error();
 				X509_free(ca);
 				BIO_free(in);
 				free(de);
-				ha_warning("ca-file: '%s' couldn't load '%s'\n", path, trash.area);
+				/* warn if it can load one of the files, but don't abort */
+				if (!shuterror)
+					ha_warning("ca-file: '%s' couldn't load '%s' (%s)\n", path, trash.area, ERR_reason_error_string(e));
 
 			}
 			free(de_list);
 		} else {
-			ha_alert("ca-file: couldn't load '%s'\n", path);
+			if (!shuterror)
+				ha_alert("ca-file: couldn't load '%s'\n", path);
 			goto err;
 		}
 
 		objs = X509_STORE_get0_objects(store);
 		cert_count = sk_X509_OBJECT_num(objs);
-		if (cert_count == 0)
-			ha_warning("ca-file: 0 CA were loaded from '%s'\n", path);
-
+		if (cert_count == 0) {
+			if (!shuterror)
+				ha_warning("ca-file: 0 CA were loaded from '%s'\n", path);
+		}
 		ca_e = ssl_store_create_cafile_entry(path, store, type);
-		if (!ca_e)
+		if (!ca_e) {
+			if (!shuterror)
+				ha_alert("Cannot allocate memory!\n");
 			goto err;
+		}
 		ebst_insert(&cafile_tree, &ca_e->node);
 	}
 	return (store != NULL);
@@ -1304,6 +1334,10 @@ err:
 
 }
 
+int ssl_store_load_locations_file(char *path, int create_if_none, enum cafile_type type)
+{
+	return __ssl_store_load_locations_file(path, create_if_none, type, 0);
+}
 
 /*************************** CLI commands ***********************/
 

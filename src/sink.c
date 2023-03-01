@@ -954,6 +954,12 @@ int cfg_parse_ring(const char *file, int linenum, char **args, int kwm)
 		cfg_sink->ctx.ring = ring_make_from_area(area, size);
 	}
 	else if (strcmp(args[0],"server") == 0) {
+		if (!cfg_sink || (cfg_sink->type != SINK_TYPE_BUFFER)) {
+			ha_alert("parsing [%s:%d] : unable to create server '%s'.\n", file, linenum, args[1]);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto err;
+		}
+
 		err_code |= parse_server(file, linenum, args, cfg_sink->forward_px, NULL,
 		                         SRV_PARSE_PARSE_ADDR|SRV_PARSE_INITIAL_RESOLVE);
 	}
@@ -1387,12 +1393,18 @@ static void sink_deinit()
 
 	list_for_each_entry_safe(sink, sb, &sink_list, sink_list) {
 		if (sink->type == SINK_TYPE_BUFFER) {
-			if (sink->store)
-				munmap(sink->ctx.ring->buf.area, sink->ctx.ring->buf.size);
+			if (sink->store) {
+				size_t size = (sink->ctx.ring->buf.size + 4095UL) & -4096UL;
+				void *area = (sink->ctx.ring->buf.area - sizeof(*sink->ctx.ring));
+
+				msync(area, size, MS_SYNC);
+				munmap(area, size);
+			}
 			else
 				ring_free(sink->ctx.ring);
 		}
 		LIST_DELETE(&sink->sink_list);
+		task_destroy(sink->forward_task);
 		free(sink->name);
 		free(sink->desc);
 		free(sink);

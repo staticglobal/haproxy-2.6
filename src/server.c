@@ -4758,6 +4758,9 @@ static int cli_parse_add_server(char **args, char *payload, struct appctx *appct
 		goto out;
 	}
 
+	/* ensure minconn/maxconn consistency */
+	srv_minmax_conn_apply(srv);
+
 	if (srv->use_ssl == 1 || (srv->proxy->options & PR_O_TCPCHK_SSL) ||
 	    srv->check.use_ssl == 1) {
 		if (xprt_get(XPRT_SSL) && xprt_get(XPRT_SSL)->prepare_srv) {
@@ -5924,7 +5927,7 @@ struct task *srv_cleanup_idle_conns(struct task *task, void *context, unsigned i
 		if (srv->est_need_conns < srv->max_used_conns)
 			srv->est_need_conns = srv->max_used_conns;
 
-		srv->max_used_conns = srv->curr_used_conns;
+		HA_ATOMIC_STORE(&srv->max_used_conns, srv->curr_used_conns);
 
 		if (exceed_conns <= 0)
 			goto remove;

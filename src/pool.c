@@ -851,9 +851,9 @@ void pool_destroy_all()
 void dump_pools_to_trash()
 {
 	struct pool_head *entry;
-	unsigned long allocated, used;
+	unsigned long long allocated, used;
 	int nbpools;
-	unsigned long cached_bytes = 0;
+	unsigned long long cached_bytes = 0;
 	uint cached = 0;
 
 	allocated = used = nbpools = 0;
@@ -863,24 +863,24 @@ void dump_pools_to_trash()
 			int i;
 			for (cached = i = 0; i < global.nbthread; i++)
 				cached += entry->cache[i].count;
-			cached_bytes += cached * entry->size;
+			cached_bytes += cached * (ullong)entry->size;
 		}
-		chunk_appendf(&trash, "  - Pool %s (%u bytes) : %u allocated (%u bytes), %u used"
+		chunk_appendf(&trash, "  - Pool %s (%u bytes) : %u allocated (%llu bytes), %u used"
 			      " (~%u by thread caches)"
 			      ", needed_avg %u, %u failures, %u users, @%p%s\n",
 		              entry->name, entry->size, entry->allocated,
-		              entry->size * entry->allocated, entry->used,
+		              (ullong)entry->size * entry->allocated, entry->used,
 		              cached,
 		              swrate_avg(entry->needed_avg, POOL_AVG_SAMPLES), entry->failed,
 		              entry->users, entry,
 		              (entry->flags & MEM_F_SHARED) ? " [SHARED]" : "");
 
-		allocated += entry->allocated * entry->size;
-		used += entry->used * entry->size;
+		allocated += entry->allocated * (ullong)entry->size;
+		used += entry->used * (ullong)entry->size;
 		nbpools++;
 	}
-	chunk_appendf(&trash, "Total: %d pools, %lu bytes allocated, %lu used"
-		      " (~%lu by thread caches)"
+	chunk_appendf(&trash, "Total: %d pools, %llu bytes allocated, %llu used"
+		      " (~%llu by thread caches)"
 		      ".\n",
 	              nbpools, allocated, used, cached_bytes
 		      );
@@ -905,24 +905,24 @@ int pool_total_failures()
 }
 
 /* This function returns the total amount of memory allocated in pools (in bytes) */
-unsigned long pool_total_allocated()
+unsigned long long pool_total_allocated()
 {
 	struct pool_head *entry;
-	unsigned long allocated = 0;
+	unsigned long long allocated = 0;
 
 	list_for_each_entry(entry, &pools, list)
-		allocated += entry->allocated * entry->size;
+		allocated += entry->allocated * (ullong)entry->size;
 	return allocated;
 }
 
 /* This function returns the total amount of memory used in pools (in bytes) */
-unsigned long pool_total_used()
+unsigned long long pool_total_used()
 {
 	struct pool_head *entry;
-	unsigned long used = 0;
+	unsigned long long used = 0;
 
 	list_for_each_entry(entry, &pools, list)
-		used += entry->used * entry->size;
+		used += entry->used * (ullong)entry->size;
 	return used;
 }
 

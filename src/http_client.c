@@ -1216,11 +1216,8 @@ static int httpclient_precheck()
 	/* if the verify is required, try to load the system CA */
 	if (httpclient_ssl_verify == SSL_SOCK_VERIFY_REQUIRED) {
 
-		if (!httpclient_ssl_ca_file)
-			httpclient_ssl_ca_file = strdup("@system-ca");
-
-		httpclient_srv_ssl->ssl_ctx.ca_file = httpclient_ssl_ca_file;
-		if (!ssl_store_load_locations_file(httpclient_srv_ssl->ssl_ctx.ca_file, 1, CAFILE_CERT)) {
+		httpclient_srv_ssl->ssl_ctx.ca_file = strdup(httpclient_ssl_ca_file ? httpclient_ssl_ca_file : "@system-ca");
+		if (!__ssl_store_load_locations_file(httpclient_srv_ssl->ssl_ctx.ca_file, 1, CAFILE_CERT, !hard_error_ssl)) {
 			/* if we failed to load the ca-file, only quits in
 			 * error with hard_error, otherwise just disable the
 			 * feature. */

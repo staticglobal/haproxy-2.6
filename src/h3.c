@@ -139,6 +139,7 @@ DECLARE_STATIC_POOL(pool_head_h3c, "h3c", sizeof(struct h3c));
 
 #define H3_SF_UNI_INIT  0x00000001  /* stream type not parsed for unidirectional stream */
 #define H3_SF_UNI_NO_H3 0x00000002  /* unidirectional stream does not carry H3 frames */
+#define H3_SF_HAVE_CLEN 0x00000004  /* content-length header is present */
 
 struct h3s {
 	struct h3c *h3c;
@@ -147,6 +148,9 @@ struct h3s {
 	enum h3s_st_req st_req; /* only used for request streams */
 	int demux_frame_len;
 	int demux_frame_type;
+
+	unsigned long long body_len; /* known request body length from content-length header if present */
+	unsigned long long data_len; /* total length of all parsed DATA */
 
 	int flags;
 };
@@ -331,6 +335,47 @@ static int h3_is_frame_valid(struct h3c *h3c, struct qcs *qcs, uint64_t ftype)
 	}
 }
 
+/* Check from stream <qcs> that length of all DATA frames does not exceed with
+ * a previously parsed content-length header. <fin> must be set for the last
+ * data of the stream so that length of DATA frames must be equal to the
+ * content-length.
+ *
+ * This must only be called for a stream with H3_SF_HAVE_CLEN flag.
+ *
+ * Return 0 on valid else non-zero.
+ */
+static int h3_check_body_size(struct qcs *qcs, int fin)
+{
+	struct h3s *h3s = qcs->ctx;
+	int ret = 0;
+	TRACE_ENTER(H3_EV_RX_FRAME, qcs->qcc->conn, qcs);
+
+	/* Reserved for streams with a previously parsed content-length header. */
+	BUG_ON(!(h3s->flags & H3_SF_HAVE_CLEN));
+
+	/* RFC 9114 4.1.2. Malformed Requests and Responses
+	 *
+	 * A request or response that is defined as having content when it
+	 * contains a Content-Length header field (Section 8.6 of [HTTP]) is
+	 * malformed if the value of the Content-Length header field does not
+	 * equal the sum of the DATA frame lengths received.
+	 *
+	 * TODO for backend support
+	 * A response that is
+	 * defined as never having content, even when a Content-Length is
+	 * present, can have a non-zero Content-Length header field even though
+	 * no content is included in DATA frames.
+	 */
+	if (h3s->data_len > h3s->body_len ||
+	    (fin && h3s->data_len < h3s->body_len)) {
+		TRACE_ERROR("Content-length does not match DATA frame size", H3_EV_RX_FRAME|H3_EV_RX_DATA, qcs->qcc->conn, qcs);
+		ret = -1;
+	}
+
+	TRACE_LEAVE(H3_EV_RX_FRAME, qcs->qcc->conn, qcs);
+	return ret;
+}
+
 /* Parse from buffer <buf> a H3 HEADERS frame of length <len>. Data are copied
  * in a local HTX buffer and transfer to the stream connector layer. <fin> must be
  * set if this is the last data to transfer from this stream.
@@ -349,10 +394,29 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 	struct http_hdr list[global.tune.max_http_hdr];
 	unsigned int flags = HTX_SL_F_NONE;
 	struct ist meth = IST_NULL, path = IST_NULL;
-	//struct ist scheme = IST_NULL, authority = IST_NULL;
-	struct ist authority = IST_NULL;
+	struct ist scheme = IST_NULL, authority = IST_NULL;
 	int hdr_idx, ret;
-	int cookie = -1, last_cookie = -1;
+	int cookie = -1, last_cookie = -1, i;
+
+	/* RFC 9114 4.1.2. Malformed Requests and Responses
+	 *
+	 * A malformed request or response is one that is an otherwise valid
+	 * sequence of frames but is invalid due to:
+	 * - the presence of prohibited fields or pseudo-header fields,
+	 * - the absence of mandatory pseudo-header fields,
+	 * - invalid values for pseudo-header fields,
+	 * - pseudo-header fields after fields,
+	 * - an invalid sequence of HTTP messages,
+	 * - the inclusion of uppercase field names, or
+	 * - the inclusion of invalid characters in field names or values.
+	 *
+	 * [...]
+	 *
+	 * Intermediaries that process HTTP requests or responses (i.e., any
+	 * intermediary not acting as a tunnel) MUST NOT forward a malformed
+	 * request or response. Malformed requests or responses that are
+	 * detected MUST be treated as a stream error of type H3_MESSAGE_ERROR.
+	 */
 
 	TRACE_ENTER(H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
 
@@ -365,32 +429,89 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 	if (ret < 0) {
 		TRACE_ERROR("QPACK decoding error", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
 		h3c->err = -ret;
-		return -1;
+		len = -1;
+		goto out;
 	}
 
 	qc_get_buf(qcs, &htx_buf);
-	BUG_ON(!b_size(&htx_buf));
+	BUG_ON(!b_size(&htx_buf)); /* TODO */
 	htx = htx_from_buf(&htx_buf);
 
 	/* first treat pseudo-header to build the start line */
 	hdr_idx = 0;
 	while (1) {
-		if (isteq(list[hdr_idx].n, ist("")))
+		/* RFC 9114 4.3. HTTP Control Data
+		 *
+		 * Endpoints MUST treat a request or response that contains
+		 * undefined or invalid pseudo-header fields as malformed.
+		 *
+		 * All pseudo-header fields MUST appear in the header section before
+		 * regular header fields. Any request or response that contains a
+		 * pseudo-header field that appears in a header section after a regular
+		 * header field MUST be treated as malformed.
+		 */
+
+		/* Stop at first non pseudo-header. */
+		if (!istmatch(list[hdr_idx].n, ist(":")))
 			break;
 
-		if (istmatch(list[hdr_idx].n, ist(":"))) {
-			/* pseudo-header */
-			if (isteq(list[hdr_idx].n, ist(":method")))
-				meth = list[hdr_idx].v;
-			else if (isteq(list[hdr_idx].n, ist(":path")))
-				path = list[hdr_idx].v;
-			//else if (isteq(list[hdr_idx].n, ist(":scheme")))
-			//	scheme = list[hdr_idx].v;
-			else if (isteq(list[hdr_idx].n, ist(":authority")))
-				authority = list[hdr_idx].v;
+		/* pseudo-header. Malformed name with uppercase character or
+		 * invalid token will be rejected in the else clause.
+		 */
+		if (isteq(list[hdr_idx].n, ist(":method"))) {
+			if (isttest(meth)) {
+				TRACE_ERROR("duplicated method pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+				len = -1;
+				goto out;
+			}
+			meth = list[hdr_idx].v;
+		}
+		else if (isteq(list[hdr_idx].n, ist(":path"))) {
+			if (isttest(path)) {
+				TRACE_ERROR("duplicated path pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+				len = -1;
+				goto out;
+			}
+			path = list[hdr_idx].v;
+		}
+		else if (isteq(list[hdr_idx].n, ist(":scheme"))) {
+			if (isttest(scheme)) {
+				/* duplicated pseudo-header */
+				TRACE_ERROR("duplicated scheme pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+				len = -1;
+				goto out;
+			}
+			scheme = list[hdr_idx].v;
+		}
+		else if (isteq(list[hdr_idx].n, ist(":authority"))) {
+			if (isttest(authority)) {
+				TRACE_ERROR("duplicated authority pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+				len = -1;
+				goto out;
+			}
+			authority = list[hdr_idx].v;
+		}
+		else {
+			TRACE_ERROR("unknown pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+			len = -1;
+			goto out;
 		}
 
 		++hdr_idx;
+	}
+
+	if (!istmatch(meth, ist("CONNECT"))) {
+		/* RFC 9114 4.3.1. Request Pseudo-Header Fields
+		 *
+		 * All HTTP/3 requests MUST include exactly one value for the :method,
+		 * :scheme, and :path pseudo-header fields, unless the request is a
+		 * CONNECT request; see Section 4.4.
+		 */
+		if (!isttest(meth) || !isttest(scheme) || !isttest(path)) {
+			TRACE_ERROR("missing mandatory pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+			len = -1;
+			goto out;
+		}
 	}
 
 	flags |= HTX_SL_F_VER_11;
@@ -399,7 +520,8 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 	sl = htx_add_stline(htx, HTX_BLK_REQ_SL, flags, meth, path, ist("HTTP/3.0"));
 	if (!sl) {
 		h3c->err = H3_INTERNAL_ERROR;
-		return -1;
+		len = -1;
+		goto out;
 	}
 
 	if (fin)
@@ -411,38 +533,107 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 		htx_add_header(htx, ist("host"), authority);
 
 	/* now treat standard headers */
-	hdr_idx = 0;
 	while (1) {
 		if (isteq(list[hdr_idx].n, ist("")))
 			break;
 
-		if (isteq(list[hdr_idx].n, ist("cookie"))) {
-			http_cookie_register(list, hdr_idx, &cookie, &last_cookie);
-			continue;
+		if (istmatch(list[hdr_idx].n, ist(":"))) {
+			TRACE_ERROR("pseudo-header field after fields", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+			len = -1;
+			goto out;
 		}
 
-		if (!istmatch(list[hdr_idx].n, ist(":")))
-			htx_add_header(htx, list[hdr_idx].n, list[hdr_idx].v);
+		for (i = 0; i < list[hdr_idx].n.len; ++i) {
+			const char c = list[hdr_idx].n.ptr[i];
+			if ((uint8_t)(c - 'A') < 'Z' - 'A' || !HTTP_IS_TOKEN(c)) {
+				TRACE_ERROR("invalid characters in field name", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+				len = -1;
+				goto out;
+			}
+		}
 
+		if (isteq(list[hdr_idx].n, ist("cookie"))) {
+			http_cookie_register(list, hdr_idx, &cookie, &last_cookie);
+			++hdr_idx;
+			continue;
+		}
+		else if (isteq(list[hdr_idx].n, ist("content-length"))) {
+			ret = http_parse_cont_len_header(&list[hdr_idx].v,
+			                                 &h3s->body_len,
+			                                 h3s->flags & H3_SF_HAVE_CLEN);
+			if (ret < 0) {
+				TRACE_ERROR("invalid content-length", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+				len = -1;
+				goto out;
+			}
+			else if (!ret) {
+				/* Skip duplicated value. */
+				++hdr_idx;
+				continue;
+			}
+
+			h3s->flags |= H3_SF_HAVE_CLEN;
+			/* This will fail if current frame is the last one and
+			 * content-length is not null.
+			 */
+			if (h3_check_body_size(qcs, fin)) {
+				len = -1;
+				goto out;
+			}
+		}
+		else if (isteq(list[hdr_idx].n, ist("connection")) ||
+		         isteq(list[hdr_idx].n, ist("proxy-connection")) ||
+		         isteq(list[hdr_idx].n, ist("keep-alive")) ||
+		         isteq(list[hdr_idx].n, ist("transfer-encoding"))) {
+			/* RFC 9114 4.2. HTTP Fields
+		         *
+		         * HTTP/3 does not use the Connection header field to indicate
+		         * connection-specific fields; in this protocol, connection-
+		         * specific metadata is conveyed by other means. An endpoint
+		         * MUST NOT generate an HTTP/3 field section containing
+		         * connection-specific fields; any message containing
+		         * connection-specific fields MUST be treated as malformed.
+		         */
+			TRACE_ERROR("invalid connection header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+			len = -1;
+			goto out;
+		}
+		else if (isteq(list[hdr_idx].n, ist("te")) &&
+		         !isteq(list[hdr_idx].v, ist("trailers"))) {
+			/* RFC 9114 4.2. HTTP Fields
+			 *
+			 * The only exception to this is the TE header field, which MAY
+			 * be present in an HTTP/3 request header; when it is, it MUST
+			 * NOT contain any value other than "trailers".
+			 */
+			TRACE_ERROR("invalid te header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+			len = -1;
+			goto out;
+		}
+
+		htx_add_header(htx, list[hdr_idx].n, list[hdr_idx].v);
 		++hdr_idx;
 	}
 
 	if (cookie >= 0) {
 		if (http_cookie_merge(htx, list, cookie)) {
 			h3c->err = H3_INTERNAL_ERROR;
-			return -1;
+			len = -1;
+			goto out;
 		}
 	}
 
 	htx_add_endof(htx, HTX_BLK_EOH);
-	htx_to_buf(htx, &htx_buf);
-
 	if (fin)
 		htx->flags |= HTX_FL_EOM;
 
+	htx_to_buf(htx, &htx_buf);
+	htx = NULL;
+
 	if (!qc_attach_sc(qcs, &htx_buf)) {
 		h3c->err = H3_INTERNAL_ERROR;
-		return -1;
+		len = -1;
+		goto out;
 	}
 
 	/* RFC 9114 5.2. Connection Shutdown
@@ -458,11 +649,18 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 	if (qcs->id >= h3c->id_goaway)
 		h3c->id_goaway = qcs->id + 4;
 
+ out:
+	/* HTX may be non NULL if error before previous htx_to_buf(). */
+	if (htx)
+		htx_to_buf(htx, &htx_buf);
+
 	/* buffer is transferred to the stream connector and set to NULL
 	 * except on stream creation error.
 	 */
-	b_free(&htx_buf);
-	offer_buffers(NULL, 1);
+	if (b_size(&htx_buf)) {
+		b_free(&htx_buf);
+		offer_buffers(NULL, 1);
+	}
 
 	TRACE_LEAVE(H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
 	return len;
@@ -661,8 +859,8 @@ static ssize_t h3_decode_qcs(struct qcs *qcs, struct buffer *b, int fin)
 		uint64_t ftype, flen;
 		char last_stream_frame = 0;
 
-		/* Work on a copy of <rxbuf> */
 		if (!h3s->demux_frame_len) {
+			/* Switch to a new frame. */
 			size_t hlen = h3_decode_frm_header(&ftype, &flen, b);
 			if (!hlen)
 				break;
@@ -673,6 +871,15 @@ static ssize_t h3_decode_qcs(struct qcs *qcs, struct buffer *b, int fin)
 			h3s->demux_frame_type = ftype;
 			h3s->demux_frame_len = flen;
 			total += hlen;
+
+			/* Check that content-length is not exceeded on a new DATA frame. */
+			if (ftype == H3_FT_DATA) {
+				h3s->data_len += flen;
+				if (h3s->flags & H3_SF_HAVE_CLEN && h3_check_body_size(qcs, fin)) {
+					qcc_emit_cc_app(qcs->qcc, h3c->err, 1);
+					return -1;
+				}
+			}
 
 			if (!h3_is_frame_valid(h3c, qcs, ftype)) {
 				qcc_emit_cc_app(qcs->qcc, H3_FRAME_UNEXPECTED, 1);
@@ -701,6 +908,12 @@ static ssize_t h3_decode_qcs(struct qcs *qcs, struct buffer *b, int fin)
 				return -1;
 			}
 			break;
+		}
+
+		/* Check content-length equality with DATA frames length on the last frame. */
+		if (fin && h3s->flags & H3_SF_HAVE_CLEN && h3_check_body_size(qcs, fin)) {
+			qcc_emit_cc_app(qcs->qcc, h3c->err, 1);
+			return -1;
 		}
 
 		last_stream_frame = (fin && flen == b_data(b));
@@ -902,13 +1115,28 @@ static int h3_resp_headers_send(struct qcs *qcs, struct htx *htx)
 		if (isteq(list[hdr].n, ist("")))
 			break;
 
-		/* draft-ietf-quic-http34 4.1. HTTP Message Exchanges
-		 * Transfer codings (see Section 6.1 of [HTTP11]) are not
-		 * defined for HTTP/3; the Transfer-Encoding header field MUST
-		 * NOT be used.
+		/* RFC 9114 4.2. HTTP Fields
+		 *
+		 * An intermediary transforming an HTTP/1.x message to HTTP/3
+		 * MUST remove connection-specific header fields as discussed in
+		 * Section 7.6.1 of [HTTP], or their messages will be treated by
+		 * other HTTP/3 endpoints as malformed.
 		 */
-		if (isteq(list[hdr].n, ist("transfer-encoding")))
+		if (isteq(list[hdr].n, ist("connection")) ||
+		    isteq(list[hdr].n, ist("proxy-connection")) ||
+		    isteq(list[hdr].n, ist("keep-alive")) ||
+		    isteq(list[hdr].n, ist("transfer-encoding"))) {
 			continue;
+		}
+		else if (isteq(list[hdr].n, ist("te"))) {
+			/* "te" may only be sent with "trailers" if this value
+			 * is present, otherwise it must be deleted.
+			 */
+			const struct ist v = istist(list[hdr].v, ist("trailers"));
+			if (!isttest(v) || (v.len > 8 && v.ptr[8] != ','))
+				continue;
+			list[hdr].v = ist("trailers");
+		}
 
 		if (qpack_encode_header(&headers_buf, list[hdr].n, list[hdr].v))
 			ABORT_NOW();
@@ -1073,6 +1301,40 @@ static size_t h3_snd_buf(struct qcs *qcs, struct htx *htx, size_t count)
 	return total;
 }
 
+/* Notify about a closure on <qcs> stream requested by the remote peer.
+ *
+ * Stream channel <side> is explained relative to our endpoint : WR for
+ * STOP_SENDING or RD for RESET_STREAM reception. Callback decode_qcs() is used
+ * instead for closure performed using a STREAM frame with FIN bit.
+ *
+ * The main objective of this function is to check if closure is valid
+ * according to HTTP/3 specification.
+ *
+ * Returns 0 on success else non-zero. A CONNECTION_CLOSE is generated on
+ * error.
+ */
+static int h3_close(struct qcs *qcs, enum qcc_app_ops_close_side side)
+{
+	struct h3s *h3s = qcs->ctx;
+	struct h3c *h3c = h3s->h3c;;
+
+	/* RFC 9114 6.2.1. Control Streams
+	 *
+	 * The sender
+	 * MUST NOT close the control stream, and the receiver MUST NOT
+	 * request that the sender close the control stream.  If either
+	 * control stream is closed at any point, this MUST be treated
+	 * as a connection error of type H3_CLOSED_CRITICAL_STREAM.
+	 */
+	if (qcs == h3c->ctrl_strm) {
+		TRACE_ERROR("closure detected on control stream", H3_EV_H3S_END, qcs->qcc->conn, qcs);
+		qcc_emit_cc_app(qcs->qcc, H3_CLOSED_CRITICAL_STREAM, 1);
+		return 1;
+	}
+
+	return 0;
+}
+
 static int h3_attach(struct qcs *qcs, void *conn_ctx)
 {
 	struct h3s *h3s;
@@ -1088,6 +1350,8 @@ static int h3_attach(struct qcs *qcs, void *conn_ctx)
 
 	h3s->demux_frame_len = 0;
 	h3s->demux_frame_type = 0;
+	h3s->body_len = 0;
+	h3s->data_len = 0;
 	h3s->flags = 0;
 
 	if (quic_stream_is_bidi(qcs->id)) {
@@ -1259,6 +1523,7 @@ const struct qcc_app_ops h3_ops = {
 	.attach      = h3_attach,
 	.decode_qcs  = h3_decode_qcs,
 	.snd_buf     = h3_snd_buf,
+	.close       = h3_close,
 	.detach      = h3_detach,
 	.finalize    = h3_finalize,
 	.shutdown    = h3_shutdown,

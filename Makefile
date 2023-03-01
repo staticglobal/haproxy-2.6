@@ -553,7 +553,11 @@ ignore_implicit = $(if $(subst environment,,$(origin $(1))),         \
 # is used to report a list of all flags which were used to build this version.
 # Do not assign anything to it.
 BUILD_OPTIONS  := $(foreach opt,$(use_opts),$(call ignore_implicit,$(opt)))
-BUILD_FEATURES := $(foreach opt,$(patsubst USE_%,%,$(use_opts)),$(if $(USE_$(opt)),+$(opt),-$(opt)))
+
+# Make a list of all known features with +/- prepended depending on their
+# activation status. Must be a macro so that dynamically enabled ones are
+# evaluated with their current status.
+BUILD_FEATURES  = $(foreach opt,$(patsubst USE_%,%,$(sort $(use_opts))),$(if $(USE_$(opt)),+$(opt),-$(opt)))
 
 # All USE_* options have their equivalent macro defined in the code (some might
 # possibly be unused though)
@@ -1092,6 +1096,7 @@ clean:
 	$(Q)rm -f addons/promex/*.[oas]
 	$(Q)rm -f addons/51degrees/*.[oas] addons/51degrees/dummy/*.[oas] addons/51degrees/dummy/*/*.[oas]
 	$(Q)rm -f addons/deviceatlas/*.[oas] addons/deviceatlas/dummy/*.[oas] addons/deviceatlas/dummy/*.o
+	$(Q)rm -f addons/deviceatlas/dummy/Os/*.o
 	$(Q)rm -f addons/ot/src/*.[oas]
 	$(Q)rm -f addons/wurfl/*.[oas] addons/wurfl/dummy/*.[oas]
 	$(Q)rm -f admin/*/*.[oas] admin/*/*/*.[oas]

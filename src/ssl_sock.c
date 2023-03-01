@@ -1594,7 +1594,7 @@ out:
 		OCSP_CERTID_free(cid);
 
 	if (ocsp)
-		free(ocsp);
+		ssl_sock_free_ocsp(ocsp);
 
 	if (warn)
 		free(warn);
@@ -1734,6 +1734,8 @@ int ssl_sock_bind_verifycbk(int ok, X509_STORE_CTX *x_store)
 #endif
 
 	BUG_ON(!ctx || !bind_conf);
+	ALREADY_CHECKED(ctx);
+	ALREADY_CHECKED(bind_conf);
 
 	ctx->xprt_st |= SSL_SOCK_ST_FL_VERIFY_DONE;
 
@@ -1777,7 +1779,8 @@ int ssl_sock_bind_verifycbk(int ok, X509_STORE_CTX *x_store)
 			ctx->xprt_st |= SSL_SOCK_CAEDEPTH_TO_ST(depth);
 		}
 
-		if (err < 64 && bind_conf->ca_ignerr & (1ULL << err))
+		if (err <= SSL_MAX_VFY_ERROR_CODE &&
+		    cert_ignerr_bitfield_get(__objt_listener(conn->target)->bind_conf->ca_ignerr_bitfield, err))
 			goto err_ignored;
 
 		/* TODO: for QUIC connection, this error code is lost */
@@ -1790,7 +1793,8 @@ int ssl_sock_bind_verifycbk(int ok, X509_STORE_CTX *x_store)
 		ctx->xprt_st |= SSL_SOCK_CRTERROR_TO_ST(err);
 
 	/* check if certificate error needs to be ignored */
-	if (err < 64 && bind_conf->crt_ignerr & (1ULL << err))
+	if (err <= SSL_MAX_VFY_ERROR_CODE &&
+	    cert_ignerr_bitfield_get(__objt_listener(conn->target)->bind_conf->crt_ignerr_bitfield, err))
 		goto err_ignored;
 
 	/* TODO: for QUIC connection, this error code is lost */
@@ -2675,9 +2679,10 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *arg)
 		}
 
 		if (!quic_transport_params_store(qc, 0, extension_data,
-		                                 extension_data + extension_len) ||
-		    !qc_conn_finalize(qc, 0))
+		                                 extension_data + extension_len))
 			goto abort;
+
+		qc->flags |= QUIC_FL_CONN_TX_TP_RECEIVED;
 	}
 #endif /* USE_QUIC */
 
@@ -2971,10 +2976,10 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *priv)
 		}
 
 		if (!quic_transport_params_store(qc, 0, extension_data,
-		                                 extension_data + extension_len) ||
-		    !qc_conn_finalize(qc, 0)) {
+		                                 extension_data + extension_len))
 			return SSL_TLSEXT_ERR_NOACK;
-		}
+
+		qc->flags |= QUIC_FL_CONN_TX_TP_RECEIVED;
 	}
 #endif /* USE_QUIC */
 
@@ -3073,6 +3078,8 @@ end:
 	EVP_PKEY_CTX_free(ctx);
 	OSSL_PARAM_free(params);
 	OSSL_PARAM_BLD_free(tmpl);
+	BN_free(p);
+	BN_free(g);
 	return pkey;
 #else
 
@@ -3625,6 +3632,8 @@ end:
  *     ERR_FATAL in any fatal error case
  *     ERR_ALERT if the reason of the error is available in err
  *     ERR_WARN if a warning is available into err
+ * The caller is responsible of freeing the newly built or newly refcounted
+ * find_chain element.
  * The value 0 means there is no error nor warning and
  * the operation succeed.
  */
@@ -3646,13 +3655,13 @@ static int ssl_sock_load_cert_chain(const char *path, const struct cert_key_and_
 	}
 
 	if (ckch->chain) {
-		*find_chain = ckch->chain;
+		*find_chain = X509_chain_up_ref(ckch->chain);
 	} else {
 		/* Find Certificate Chain in global */
 		struct issuer_chain *issuer;
 		issuer = ssl_get0_issuer_chain(ckch->cert);
 		if (issuer)
-			*find_chain = issuer->chain;
+			*find_chain = X509_chain_up_ref(issuer->chain);
 	}
 
 	if (!*find_chain) {
@@ -3672,14 +3681,11 @@ static int ssl_sock_load_cert_chain(const char *path, const struct cert_key_and_
 #else
 	{ /* legacy compat (< openssl 1.0.2) */
 		X509 *ca;
-		STACK_OF(X509) *chain;
-		chain = X509_chain_up_ref(*find_chain);
-		while ((ca = sk_X509_shift(chain)))
+		while ((ca = sk_X509_shift(*find_chain)))
 			if (!SSL_CTX_add_extra_chain_cert(ctx, ca)) {
 				memprintf(err, "%sunable to load chain certificate into SSL Context '%s'.\n",
 					  err && *err ? *err : "", path);
 				X509_free(ca);
-				sk_X509_pop_free(chain, X509_free);
 				errcode |= ERR_ALERT | ERR_FATAL;
 				goto end;
 			}
@@ -3767,6 +3773,7 @@ static int ssl_sock_put_ckch_into_ctx(const char *path, const struct cert_key_an
 #endif
 
  end:
+	sk_X509_pop_free(find_chain, X509_free);
 	return errcode;
 }
 
@@ -3804,6 +3811,7 @@ static int ssl_sock_put_srv_ckch_into_ctx(const char *path, const struct cert_ke
 	}
 
 end:
+	sk_X509_pop_free(find_chain, X509_free);
 	return errcode;
 }
 
@@ -4502,6 +4510,7 @@ static int sh_ssl_sess_store(unsigned char *s_id, unsigned char *data, int data_
 	if (oldsh_ssl_sess != sh_ssl_sess) {
 		 /* NOTE: Row couldn't be in use because we lock read & write function */
 		/* release the reserved row */
+		first->len = 0; /* the len must be liberated in order not to call the release callback on it */
 		shctx_row_dec_hot(ssl_shctx, first);
 		/* replace the previous session already in the tree */
 		sh_ssl_sess = oldsh_ssl_sess;
@@ -4961,7 +4970,9 @@ static int ssl_sock_prepare_ctx(struct bind_conf *bind_conf, struct ssl_bind_con
 	SSL_CTX_set_msg_callback(ctx, ssl_sock_msgcbk);
 #endif
 #ifdef HAVE_SSL_KEYLOG
-	SSL_CTX_set_keylog_callback(ctx, SSL_CTX_keylog);
+	/* only activate the keylog callback if it was required to prevent performance loss */
+	if (global_ssl.keylog > 0)
+		SSL_CTX_set_keylog_callback(ctx, SSL_CTX_keylog);
 #endif
 
 #if defined(OPENSSL_NPN_NEGOTIATED) && !defined(OPENSSL_NO_NEXTPROTONEG)
@@ -5203,8 +5214,10 @@ int ssl_sock_prepare_srv_ctx(struct server *srv)
 {
 	int cfgerr = 0;
 	SSL_CTX *ctx;
-	/* Automatic memory computations need to know we use SSL there */
-	global.ssl_used_backend = 1;
+	/* Automatic memory computations need to know we use SSL there
+	 * If this is an internal proxy, don't use it for the computation */
+	if (!(srv->proxy && srv->proxy->cap & PR_CAP_INT))
+		global.ssl_used_backend = 1;
 
 	/* Initiate SSL context for current server */
 	if (!srv->ssl_ctx.reused_sess) {
@@ -7220,8 +7233,8 @@ int ssl_load_global_issuer_from_BIO(BIO *in, char *fp, char **err)
 				break;
 			}
 		}
-		AUTHORITY_KEYID_free(akid);
 	}
+	AUTHORITY_KEYID_free(akid);
 	return issuer;
 }
 

@@ -483,6 +483,8 @@ struct quic_tx_packet {
 	int refcnt;
 	/* Next packet in the same datagram */
 	struct quic_tx_packet *next;
+	/* Previous packet in the same datagram */
+	struct quic_tx_packet *prev;
 	/* Largest acknowledged packet number if this packet contains an ACK frame */
 	int64_t largest_acked_pn;
 	unsigned char type;
@@ -614,11 +616,15 @@ enum qc_mux_state {
 /* gap here */
 #define QUIC_FL_CONN_HALF_OPEN_CNT_DECREMENTED   (1U << 11) /* The half-open connection counter was decremented */
 #define QUIC_FL_CONN_HANDSHAKE_SPEED_UP          (1U << 12) /* Handshake speeding up was done */
+#define QUIC_FL_CONN_TO_KILL                     (1U << 24) /* Unusable connection, to be killed */
+#define QUIC_FL_CONN_TX_TP_RECEIVED              (1U << 25) /* Peer transport parameters have been received (used for the transmitting part) */
+#define QUIC_FL_CONN_FINALIZED                   (1U << 26) /* QUIC connection finalized (functional, ready to send/receive) */
 #define QUIC_FL_CONN_NOTIFY_CLOSE                (1U << 27) /* MUX notified about quic-conn imminent closure (idle-timeout or CONNECTION_CLOSE emission/reception) */
 #define QUIC_FL_CONN_EXP_TIMER                   (1U << 28) /* timer has expired, quic-conn can be freed */
 #define QUIC_FL_CONN_CLOSING                     (1U << 29)
 #define QUIC_FL_CONN_DRAINING                    (1U << 30)
 #define QUIC_FL_CONN_IMMEDIATE_CLOSE             (1U << 31)
+
 struct quic_conn {
 	const struct quic_version *original_version;
 	const struct quic_version *negotiated_version;
@@ -706,6 +712,7 @@ struct quic_conn {
 	int stream_buf_count; /* total count of allocated stream buffers for this connection */
 
 	struct wait_event wait_event;
+	struct wait_event *subs;
 
 	/* MUX */
 	struct qcc *qcc;

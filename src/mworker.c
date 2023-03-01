@@ -161,16 +161,25 @@ struct mworker_proc *mworker_proc_new()
 
 /*
  * unserialize the proc list from the environment
+ * Return < 0 upon error.
  */
 int mworker_env_to_proc_list()
 {
-	char *msg, *token = NULL, *s1;
+	char *env, *msg, *omsg = NULL, *token = NULL, *s1;
 	struct mworker_proc *child;
 	int minreloads = INT_MAX; /* minimum number of reloads to chose which processes are "current" ones */
+	int err = 0;
 
-	msg = getenv("HAPROXY_PROCESSES");
-	if (!msg)
-		return 0;
+	env = getenv("HAPROXY_PROCESSES");
+	if (!env)
+		goto no_env;
+
+	omsg = msg = strdup(env);
+	if (!msg) {
+		ha_alert("Out of memory while trying to allocate a worker process structure.");
+		err = -1;
+		goto out;
+	}
 
 	while ((token = strtok_r(msg, "|", &s1))) {
 		char *subtoken = NULL;
@@ -180,8 +189,9 @@ int mworker_env_to_proc_list()
 
 		child = mworker_proc_new();
 		if (!child) {
-			ha_alert("Out of memory while trying to allocate a worker process structure.");
-			return -1;
+			ha_alert("out of memory while trying to allocate a worker process structure.");
+			err = -1;
+			goto out;
 		}
 
 		while ((subtoken = strtok_r(token, ";", &s2))) {
@@ -237,7 +247,27 @@ int mworker_env_to_proc_list()
 
 	unsetenv("HAPROXY_PROCESSES");
 
-	return 0;
+no_env:
+
+	if (!proc_self) {
+
+		proc_self = mworker_proc_new();
+		if (!proc_self) {
+			ha_alert("Cannot allocate process structures.\n");
+			err = -1;
+			goto out;
+		}
+		proc_self->options |= PROC_O_TYPE_MASTER;
+		proc_self->pid = pid;
+		proc_self->timestamp = 0; /* we don't know the startime anymore */
+
+		LIST_APPEND(&proc_list, &proc_self->list);
+		ha_warning("The master internals are corrupted or it was started with a too old version (< 1.9). Please restart the master process.\n");
+	}
+
+out:
+	free(omsg);
+	return err;
 }
 
 /* Signal blocking and unblocking */
@@ -433,6 +463,9 @@ static int mworker_pipe_register_per_thread()
 	if (tid != 0)
 		return 1;
 
+	if (proc_self->ipc_fd[1] < 0) /* proc_self was incomplete and we can't find the socketpair */
+		return 1;
+
 	fd_set_nonblock(proc_self->ipc_fd[1]);
 	/* In multi-tread, we need only one thread to process
 	 * events on the pipe with master
@@ -462,8 +495,10 @@ void mworker_cleanlisteners()
 
 		stop_proxy(curpeers->peers_fe);
 		/* disable this peer section so that it kills itself */
-		signal_unregister_handler(curpeers->sighandler);
-		task_destroy(curpeers->sync_task);
+		if (curpeers->sighandler)
+			signal_unregister_handler(curpeers->sighandler);
+		if (curpeers->sync_task)
+			task_destroy(curpeers->sync_task);
 		curpeers->sync_task = NULL;
 		task_destroy(curpeers->peers_fe->task);
 		curpeers->peers_fe->task = NULL;

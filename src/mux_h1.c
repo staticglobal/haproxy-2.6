@@ -2355,7 +2355,7 @@ static size_t h1_process_mux(struct h1c *h1c, struct buffer *buf, size_t count)
 					/* EOM flag is set or empty payload (C-L to 0) and it is the last block */
 					if (htx_is_unique_blk(chn_htx, blk) &&
 					    ((chn_htx->flags & HTX_FL_EOM) || ((h1m->flags & H1_MF_CLEN) && !h1m->curr_len))) {
-						if (h1m->flags & H1_MF_CHNK) {
+						if ((h1m->flags & H1_MF_CHNK) && !(h1s->flags & H1S_F_BODYLESS_RESP)) {
 							if (!chunk_memcat(&tmp, "\r\n0\r\n\r\n", 7))
 								goto full;
 						}
@@ -2781,9 +2781,10 @@ static int h1_handle_req_tout(struct h1c *h1c)
 		_HA_ATOMIC_INC(&sess->listener->counters->failed_req);
 
 	h1c->errcode = 408;
+	ret = h1_send_error(h1c);
 	if (b_data(&h1c->ibuf) || !(sess->fe->options & PR_O_NULLNOLOG))
-		ret = h1_send_error(h1c);
-	sess_log(sess);
+		sess_log(sess);
+
   end:
 	return ret;
 }
@@ -3916,6 +3917,13 @@ static int h1_show_fd(struct buffer *msg, struct connection *conn)
 		      (unsigned int)b_head_ofs(&h1c->ibuf), (unsigned int)b_size(&h1c->ibuf),
 		       (unsigned int)b_data(&h1c->obuf), b_orig(&h1c->obuf),
 		      (unsigned int)b_head_ofs(&h1c->obuf), (unsigned int)b_size(&h1c->obuf));
+
+	chunk_appendf(msg, " .task=%p", h1c->task);
+	if (h1c->task) {
+		chunk_appendf(msg, " .exp=%s",
+			      h1c->task->expire ? tick_is_expired(h1c->task->expire, now_ms) ? "<PAST>" :
+			      human_time(TICKS_TO_MS(h1c->task->expire - now_ms), TICKS_TO_MS(1000)) : "<NEVER>");
+	}
 
 	if (h1s) {
 		char *method;

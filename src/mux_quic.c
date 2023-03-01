@@ -35,6 +35,59 @@ static void qcc_emit_cc(struct qcc *qcc, int err)
 	TRACE_LEAVE(QMUX_EV_QCC_END, qcc->conn);
 }
 
+static void qc_free_ncbuf(struct qcs *qcs, struct ncbuf *ncbuf)
+{
+	struct buffer buf;
+
+	if (ncb_is_null(ncbuf))
+		return;
+
+	buf = b_make(ncbuf->area, ncbuf->size, 0, 0);
+	b_free(&buf);
+	offer_buffers(NULL, 1);
+
+	*ncbuf = NCBUF_NULL;
+}
+
+/* Free <qcs> instance. This function is reserved for internal usage : it must
+ * only be called on qcs alloc error or on connection shutdown. Else
+ * qcs_destroy must be prefered to handle QUIC flow-control increase.
+ */
+static void qcs_free(struct qcs *qcs)
+{
+	struct qcc *qcc = qcs->qcc;
+
+	TRACE_ENTER(QMUX_EV_QCS_END, qcc->conn, qcs);
+
+	/* Safe to use even if already removed from the list. */
+	LIST_DEL_INIT(&qcs->el_opening);
+
+	/* Release stream endpoint descriptor. */
+	BUG_ON(qcs->sd && !se_fl_test(qcs->sd, SE_FL_ORPHAN));
+	sedesc_free(qcs->sd);
+
+	/* Release app-layer context. */
+	if (qcs->ctx && qcc->app_ops->detach)
+		qcc->app_ops->detach(qcs);
+
+	/* Release qc_stream_desc buffer from quic-conn layer. */
+	qc_stream_desc_release(qcs->stream);
+
+	/* Free Rx/Tx buffers. */
+	qc_free_ncbuf(qcs, &qcs->rx.ncbuf);
+	b_free(&qcs->tx.buf);
+
+	BUG_ON(!qcc->strms[qcs_id_type(qcs->id)].nb_streams);
+	--qcc->strms[qcs_id_type(qcs->id)].nb_streams;
+
+	/* Remove qcs from qcc tree. */
+	eb64_delete(&qcs->by_id);
+
+	pool_free(pool_head_qcs, qcs);
+
+	TRACE_LEAVE(QMUX_EV_QCS_END, qcc->conn);
+}
+
 /* Allocate a new QUIC streams with id <id> and type <type>. */
 static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 {
@@ -61,6 +114,12 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 	LIST_INIT(&qcs->el_opening);
 	qcs->start = TICK_ETERNITY;
 
+	/* store transport layer stream descriptor in qcc tree */
+	qcs->id = qcs->by_id.key = id;
+	eb64_insert(&qcc->streams_by_id, &qcs->by_id);
+
+	qcc->strms[type].nb_streams++;
+
 	/* Allocate transport layer stream descriptor. Only needed for TX. */
 	if (!quic_stream_is_uni(id) || !quic_stream_is_remote(qcc, id)) {
 		struct quic_conn *qc = qcc->conn->handle.qc;
@@ -71,18 +130,12 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 		}
 	}
 
-	qcs->id = qcs->by_id.key = id;
 	if (qcc->app_ops->attach) {
 		if (qcc->app_ops->attach(qcs, qcc->ctx)) {
 			TRACE_ERROR("app proto failure", QMUX_EV_QCS_NEW, qcc->conn, qcs);
 			goto err;
 		}
 	}
-
-	/* store transport layer stream descriptor in qcc tree */
-	eb64_insert(&qcc->streams_by_id, &qcs->by_id);
-
-	qcc->strms[type].nb_streams++;
 
 	/* If stream is local, use peer remote-limit, or else the opposite. */
 	if (quic_stream_is_bidi(id)) {
@@ -121,58 +174,9 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 	return qcs;
 
  err:
-	if (qcs->ctx && qcc->app_ops->detach)
-		qcc->app_ops->detach(qcs);
-
-	qc_stream_desc_release(qcs->stream);
-	pool_free(pool_head_qcs, qcs);
-
-	TRACE_LEAVE(QMUX_EV_QCS_NEW, qcc->conn, qcs);
+	qcs_free(qcs);
+	TRACE_LEAVE(QMUX_EV_QCS_NEW, qcc->conn);
 	return NULL;
-}
-
-static void qc_free_ncbuf(struct qcs *qcs, struct ncbuf *ncbuf)
-{
-	struct buffer buf;
-
-	if (ncb_is_null(ncbuf))
-		return;
-
-	buf = b_make(ncbuf->area, ncbuf->size, 0, 0);
-	b_free(&buf);
-	offer_buffers(NULL, 1);
-
-	*ncbuf = NCBUF_NULL;
-}
-
-/* Free a qcs. This function must only be done to remove a stream on allocation
- * error or connection shutdown. Else use qcs_destroy which handle all the
- * QUIC connection mechanism.
- */
-static void qcs_free(struct qcs *qcs)
-{
-	struct qcc *qcc = qcs->qcc;
-
-	TRACE_ENTER(QMUX_EV_QCS_END, qcc->conn, qcs);
-
-	qc_free_ncbuf(qcs, &qcs->rx.ncbuf);
-	b_free(&qcs->tx.buf);
-
-	BUG_ON(!qcc->strms[qcs_id_type(qcs->id)].nb_streams);
-	--qcc->strms[qcs_id_type(qcs->id)].nb_streams;
-
-	if (qcs->ctx && qcc->app_ops->detach)
-		qcc->app_ops->detach(qcs);
-
-	qc_stream_desc_release(qcs->stream);
-
-	BUG_ON(qcs->sd && !se_fl_test(qcs->sd, SE_FL_ORPHAN));
-	sedesc_free(qcs->sd);
-
-	eb64_delete(&qcs->by_id);
-	pool_free(pool_head_qcs, qcs);
-
-	TRACE_LEAVE(QMUX_EV_QCS_END, qcc->conn);
 }
 
 static forceinline struct stconn *qcs_sc(const struct qcs *qcs)
@@ -1098,6 +1102,13 @@ int qcc_recv_stop_sending(struct qcc *qcc, uint64_t id, uint64_t err)
 
 	qcs_idle_open(qcs);
 
+	if (qcc->app_ops->close) {
+		if (qcc->app_ops->close(qcs, QCC_APP_OPS_CLOSE_SIDE_WR)) {
+			TRACE_ERROR("closure rejected by app layer", QMUX_EV_QCC_RECV|QMUX_EV_QCS_RECV, qcc->conn, qcs);
+			goto out;
+		}
+	}
+
 	/* RFC 9000 3.5. Solicited State Transitions
 	 *
 	 * An endpoint that receives a STOP_SENDING frame
@@ -1150,12 +1161,11 @@ static int qcc_release_remote_stream(struct qcc *qcc, uint64_t id)
 		}
 	}
 	else {
-		/* TODO in HTTP/3 unidirectional streams cannot be closed or a
-		 * H3_CLOSED_CRITICAL_STREAM will be triggered before
-		 * entering here. If a new application protocol is supported it
-		 * might be necessary to implement MAX_STREAMS_UNI emission.
+		/* TODO unidirectional stream flow control with MAX_STREAMS_UNI
+		 * emission not implemented. It should be unnecessary for
+		 * HTTP/3 but may be required if other application protocols
+		 * are supported.
 		 */
-		ABORT_NOW();
 	}
 
 	TRACE_LEAVE(QMUX_EV_QCS_END, qcc->conn);
@@ -1360,15 +1370,19 @@ void qcc_streams_sent_done(struct qcs *qcs, uint64_t data, uint64_t offset)
 		/* increase offset sum on connection */
 		qcc->tx.sent_offsets += diff;
 		BUG_ON_HOT(qcc->tx.sent_offsets > qcc->rfctl.md);
-		if (qcc->tx.sent_offsets == qcc->rfctl.md)
+		if (qcc->tx.sent_offsets == qcc->rfctl.md) {
 			qcc->flags |= QC_CF_BLK_MFCTL;
+			TRACE_STATE("connection flow-control reached", QMUX_EV_QCS_SEND, qcc->conn);
+		}
 
 		/* increase offset on stream */
 		qcs->tx.sent_offset += diff;
 		BUG_ON_HOT(qcs->tx.sent_offset > qcs->tx.msd);
 		BUG_ON_HOT(qcs->tx.sent_offset > qcs->tx.offset);
-		if (qcs->tx.sent_offset == qcs->tx.msd)
+		if (qcs->tx.sent_offset == qcs->tx.msd) {
 			qcs->flags |= QC_SF_BLK_SFCTL;
+			TRACE_STATE("stream flow-control reached", QMUX_EV_QCS_SEND, qcc->conn, qcs);
+		}
 
 		if (qcs->tx.offset == qcs->tx.sent_offset &&
 		    b_full(&qcs->stream->buf->buf)) {
@@ -1598,7 +1612,9 @@ static int qc_send(struct qcc *qcc)
 			continue;
 		}
 
-		if (!b_data(&qcs->tx.buf) && !qc_stream_buf_get(qcs->stream)) {
+		/* Check if there is something to send. */
+		if (!b_data(&qcs->tx.buf) && !qcs_stream_fin(qcs) &&
+		    !qc_stream_buf_get(qcs->stream)) {
 			node = eb64_next(node);
 			continue;
 		}
@@ -1915,6 +1931,12 @@ static int qc_init(struct connection *conn, struct proxy *prx,
 	qcc->flags = 0;
 
 	qcc->app_ops = NULL;
+	if (qcc_install_app_ops(qcc, conn->handle.qc->app_ops)) {
+		TRACE_PROTO("Cannot install app layer", QMUX_EV_QCC_NEW, qcc->conn);
+		/* prepare a CONNECTION_CLOSE frame */
+		quic_set_connection_close(conn->handle.qc, quic_err_transport(QC_ERR_APPLICATION_ERROR));
+		goto fail_no_tasklet;
+	}
 
 	qcc->streams_by_id = EB_ROOT_UNIQUE;
 
@@ -1984,7 +2006,6 @@ static int qc_init(struct connection *conn, struct proxy *prx,
 
 	LIST_INIT(&qcc->send_retry_list);
 
-	qcc->subs = NULL;
 	qcc->wait_event.tasklet->process = qc_io_cb;
 	qcc->wait_event.tasklet->context = qcc;
 	qcc->wait_event.events = 0;
@@ -2024,6 +2045,8 @@ static int qc_init(struct connection *conn, struct proxy *prx,
  fail_no_timeout_task:
 	tasklet_free(qcc->wait_event.tasklet);
  fail_no_tasklet:
+	if (qcc->app_ops && qcc->app_ops->release)
+		qcc->app_ops->release(qcc->ctx);
 	pool_free(pool_head_qcc, qcc);
  fail_no_qcc:
 	TRACE_LEAVE(QMUX_EV_QCC_NEW);
@@ -2150,7 +2173,7 @@ static size_t qc_snd_buf(struct stconn *sc, struct buffer *buf,
 	if (fin)
 		qcs->flags |= QC_SF_FIN_STREAM;
 
-	if (ret) {
+	if (ret || fin) {
 		if (!(qcs->qcc->wait_event.events & SUB_RETRY_SEND))
 			tasklet_wakeup(qcs->qcc->wait_event.tasklet);
 	}

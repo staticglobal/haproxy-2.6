@@ -264,18 +264,41 @@ static inline enum srv_initaddr srv_get_next_initaddr(unsigned int *list)
 
 static inline void srv_use_conn(struct server *srv, struct connection *conn)
 {
-	unsigned int curr;
+	unsigned int curr, prev;
 
 	curr = _HA_ATOMIC_ADD_FETCH(&srv->curr_used_conns, 1);
+
 
 	/* It's ok not to do that atomically, we don't need an
 	 * exact max.
 	 */
-	if (srv->max_used_conns < curr)
-		srv->max_used_conns = curr;
+	prev = HA_ATOMIC_LOAD(&srv->max_used_conns);
+	if (prev < curr)
+		HA_ATOMIC_STORE(&srv->max_used_conns, curr);
 
-	if (srv->est_need_conns < curr)
-		srv->est_need_conns = curr;
+	prev = HA_ATOMIC_LOAD(&srv->est_need_conns);
+	if (prev < curr)
+		HA_ATOMIC_STORE(&srv->est_need_conns, curr);
+}
+
+/* checks if minconn and maxconn are consistent to each other
+ * and automatically adjust them if it is not the case
+ * This logic was historically implemented in check_config_validity()
+ * at boot time, but with the introduction of dynamic servers
+ * this may be used at multiple places in the code now
+ */
+static inline void srv_minmax_conn_apply(struct server *srv)
+{
+	if (srv->minconn > srv->maxconn) {
+		/* Only 'minconn' was specified, or it was higher than or equal
+		 * to 'maxconn'. Let's turn this into maxconn and clean it, as
+		 * this will avoid further useless expensive computations.
+		 */
+		srv->maxconn = srv->minconn;
+	} else if (srv->maxconn && !srv->minconn) {
+		/* minconn was not specified, so we set it to maxconn */
+		srv->minconn = srv->maxconn;
+	}
 }
 
 #endif /* _HAPROXY_SERVER_H */

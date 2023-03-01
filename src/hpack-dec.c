@@ -32,6 +32,7 @@
 
 #include <import/ist.h>
 #include <haproxy/chunk.h>
+#include <haproxy/global.h>
 #include <haproxy/h2.h>
 #include <haproxy/hpack-dec.h>
 #include <haproxy/hpack-huff.h>
@@ -417,6 +418,15 @@ int hpack_decode_frame(struct hpack_dht *dht, const uint8_t *raw, uint32_t len,
 				}
 			}
 			/* <name> and <value> are correctly filled here */
+		}
+
+		/* We must not accept empty header names (forbidden by the spec and used
+		 * as a list termination).
+		 */
+		if (!name.len) {
+			hpack_debug_printf("##ERR@%d##\n", __LINE__);
+			ret = -HPACK_ERR_INVALID_ARGUMENT;
+			goto leave;
 		}
 
 		/* here's what we have here :

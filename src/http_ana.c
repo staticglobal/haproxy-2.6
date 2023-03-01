@@ -907,9 +907,8 @@ int http_wait_for_request_body(struct stream *s, struct channel *req, int an_bit
 {
 	struct session *sess = s->sess;
 	struct http_txn *txn = s->txn;
-	struct http_msg *msg = &s->txn->req;
 
-	DBG_TRACE_ENTER(STRM_EV_STRM_ANA|STRM_EV_HTTP_ANA, s, txn, msg);
+	DBG_TRACE_ENTER(STRM_EV_STRM_ANA|STRM_EV_HTTP_ANA, s, txn, &s->txn->req);
 
 
 	switch (http_wait_for_msg_body(s, req, s->be->timeout.httpreq, 0)) {
@@ -967,7 +966,7 @@ int http_wait_for_request_body(struct stream *s, struct channel *req, int an_bit
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_PRXCOND;
 	if (!(s->flags & SF_FINST_MASK))
-		s->flags |= (msg->msg_state < HTTP_MSG_DATA ? SF_FINST_R : SF_FINST_D);
+		s->flags |= SF_FINST_R;
 
 	req->analysers &= AN_REQ_FLT_END;
 	req->analyse_exp = TICK_ETERNITY;
@@ -2772,6 +2771,7 @@ int http_res_set_status(unsigned int status, struct ist reason, struct stream *s
 
 	if (!http_replace_res_status(htx, ist2(trash.area, trash.data), reason))
 		return -1;
+	s->txn->status = status;
 	return 0;
 }
 
@@ -4269,7 +4269,7 @@ enum rule_result http_wait_for_msg_body(struct stream *s, struct channel *chn,
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_CLITO;
 	if (!(s->flags & SF_FINST_MASK))
-		s->flags |= SF_FINST_D;
+		s->flags |= SF_FINST_R;
 	_HA_ATOMIC_INC(&sess->fe->fe_counters.failed_req);
 	if (sess->listener && sess->listener->counters)
 		_HA_ATOMIC_INC(&sess->listener->counters->failed_req);
@@ -4282,7 +4282,7 @@ enum rule_result http_wait_for_msg_body(struct stream *s, struct channel *chn,
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= SF_ERR_SRVTO;
 	if (!(s->flags & SF_FINST_MASK))
-		s->flags |= SF_FINST_D;
+		s->flags |= SF_FINST_R;
 	stream_inc_http_fail_ctr(s);
 	http_reply_and_close(s, txn->status, http_error_message(s));
 	ret = HTTP_RULE_RES_ABRT;
@@ -5224,8 +5224,10 @@ struct http_txn *http_create_txn(struct stream *s)
 
 	txn->auth.method = HTTP_AUTH_UNKNOWN;
 
-	vars_init_head(&s->vars_txn,    SCOPE_TXN);
-	vars_init_head(&s->vars_reqres, SCOPE_REQ);
+	/* here we don't want to re-initialize s->vars_txn and s->vars_reqres
+	 * variable lists, because they were already initialized upon stream
+	 * creation in stream_new(), and thus may already contain some variables
+	 */
 
 	return txn;
 }
