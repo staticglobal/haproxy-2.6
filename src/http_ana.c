@@ -1627,9 +1627,16 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 	 * upgrade. It is not so strict because there is no test on the Upgrade
 	 * header content. But it is probably stronger enough for now.
 	 */
-	if (txn->status == 101 &&
-	    (!(txn->req.flags & HTTP_MSGF_CONN_UPG) || !(txn->rsp.flags & HTTP_MSGF_CONN_UPG)))
-		goto return_bad_res;
+	/*
+	 * Modified by bholbrook@beyondtrust.com
+	 * We intentionally relax this requirement that 101 responses are only allowed if
+	 * both the client and server sent `connection: upgrade` header.
+	 * As of 2023.03.09, our ECM client does not include this request header, maybe
+	 * others as well.
+	 */
+	//if (txn->status == 101 &&
+	//    (!(txn->req.flags & HTTP_MSGF_CONN_UPG) || !(txn->rsp.flags & HTTP_MSGF_CONN_UPG)))
+	//	goto return_bad_res;
 
 	/*
 	 * 2: check for cacheability.
