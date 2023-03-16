@@ -345,7 +345,9 @@ void ha_rwlock_init(HA_RWLOCK_T *l)
 	HA_RWLOCK_INIT(l);
 }
 
-/* returns the number of CPUs the current process is enabled to run on */
+/* returns the number of CPUs the current process is enabled to run on,
+ * regardless of any MAX_THREADS limitation.
+ */
 static int thread_cpus_enabled()
 {
 	int ret = 1;
@@ -366,7 +368,6 @@ static int thread_cpus_enabled()
 #endif
 #endif
 	ret = MAX(ret, 1);
-	ret = MIN(ret, MAX_THREADS);
 	return ret;
 }
 
@@ -462,37 +463,37 @@ void show_lock_stats()
 
 		if (lock_stats[lbl].num_write_locked)
 			fprintf(stderr,
-			        "\t # write lock  : %lu\n"
-			        "\t # write unlock: %lu (%ld)\n"
+			        "\t # write lock  : %llu\n"
+			        "\t # write unlock: %llu (%lld)\n"
 			        "\t # wait time for write     : %.3f msec\n"
 			        "\t # wait time for write/lock: %.3f nsec\n",
-			        lock_stats[lbl].num_write_locked,
-			        lock_stats[lbl].num_write_unlocked,
-			        lock_stats[lbl].num_write_unlocked - lock_stats[lbl].num_write_locked,
+			        (ullong)lock_stats[lbl].num_write_locked,
+			        (ullong)lock_stats[lbl].num_write_unlocked,
+			        (llong)(lock_stats[lbl].num_write_unlocked - lock_stats[lbl].num_write_locked),
 			        (double)lock_stats[lbl].nsec_wait_for_write / 1000000.0,
 			        lock_stats[lbl].num_write_locked ? ((double)lock_stats[lbl].nsec_wait_for_write / (double)lock_stats[lbl].num_write_locked) : 0);
 
 		if (lock_stats[lbl].num_seek_locked)
 			fprintf(stderr,
-			        "\t # seek lock   : %lu\n"
-			        "\t # seek unlock : %lu (%ld)\n"
+			        "\t # seek lock   : %llu\n"
+			        "\t # seek unlock : %llu (%lld)\n"
 			        "\t # wait time for seek      : %.3f msec\n"
 			        "\t # wait time for seek/lock : %.3f nsec\n",
-			        lock_stats[lbl].num_seek_locked,
-			        lock_stats[lbl].num_seek_unlocked,
-			        lock_stats[lbl].num_seek_unlocked - lock_stats[lbl].num_seek_locked,
+			        (ullong)lock_stats[lbl].num_seek_locked,
+			        (ullong)lock_stats[lbl].num_seek_unlocked,
+			        (llong)(lock_stats[lbl].num_seek_unlocked - lock_stats[lbl].num_seek_locked),
 			        (double)lock_stats[lbl].nsec_wait_for_seek / 1000000.0,
 			        lock_stats[lbl].num_seek_locked ? ((double)lock_stats[lbl].nsec_wait_for_seek / (double)lock_stats[lbl].num_seek_locked) : 0);
 
 		if (lock_stats[lbl].num_read_locked)
 			fprintf(stderr,
-			        "\t # read lock   : %lu\n"
-			        "\t # read unlock : %lu (%ld)\n"
+			        "\t # read lock   : %llu\n"
+			        "\t # read unlock : %llu (%lld)\n"
 			        "\t # wait time for read      : %.3f msec\n"
 			        "\t # wait time for read/lock : %.3f nsec\n",
-			        lock_stats[lbl].num_read_locked,
-			        lock_stats[lbl].num_read_unlocked,
-			        lock_stats[lbl].num_read_unlocked - lock_stats[lbl].num_read_locked,
+			        (ullong)lock_stats[lbl].num_read_locked,
+			        (ullong)lock_stats[lbl].num_read_unlocked,
+			        (llong)(lock_stats[lbl].num_read_unlocked - lock_stats[lbl].num_read_locked),
 			        (double)lock_stats[lbl].nsec_wait_for_read / 1000000.0,
 			        lock_stats[lbl].num_read_locked ? ((double)lock_stats[lbl].nsec_wait_for_read / (double)lock_stats[lbl].num_read_locked) : 0);
 	}
@@ -964,6 +965,7 @@ static void __thread_init(void)
 	preload_libgcc_s();
 
 	thread_cpus_enabled_at_boot = thread_cpus_enabled();
+	thread_cpus_enabled_at_boot = MIN(thread_cpus_enabled_at_boot, MAX_THREADS);
 
 	memprintf(&ptr, "Built with multi-threading support (MAX_THREADS=%d, default=%d).",
 		  MAX_THREADS, thread_cpus_enabled_at_boot);
@@ -1040,7 +1042,7 @@ int thread_map_to_groups()
 		q = ut / ug;
 		r = ut % ug;
 		if ((q + !!r) > MAX_THREADS_PER_GROUP) {
-			ha_alert("Too many remaining unassigned threads (%d) for thread groups (%d). Please increase thread-groups or make sure to keep thread numbers contiguous\n", ug, ut);
+			ha_alert("Too many remaining unassigned threads (%d) for thread groups (%d). Please increase thread-groups or make sure to keep thread numbers contiguous\n", ut, ug);
 			return -1;
 		}
 

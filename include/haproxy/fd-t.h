@@ -70,6 +70,7 @@ enum {
 #define FD_EXPORTED_BIT    20  /* FD is exported and must not be closed */
 #define FD_EXCL_SYSCALL_BIT 21 /* a syscall claims exclusivity on this FD */
 #define FD_DISOWN_BIT      22  /* this fd will be closed by some external code */
+#define FD_MUST_CLOSE_BIT  23  /* this fd will be closed by some external code */
 
 
 /* and flag values */
@@ -111,6 +112,7 @@ enum {
 #define FD_EXPORTED         (1U << FD_EXPORTED_BIT)
 #define FD_EXCL_SYSCALL     (1U << FD_EXCL_SYSCALL_BIT)
 #define FD_DISOWN           (1U << FD_DISOWN_BIT)
+#define FD_MUST_CLOSE       (1U << FD_MUST_CLOSE_BIT)
 
 /* FD update status after fd_update_events() */
 enum {
@@ -153,6 +155,12 @@ struct fdlist {
 
 /* info about one given fd. Note: only align on cache lines when using threads;
  * 32-bit small archs can put everything in 32-bytes when threads are disabled.
+ * refc_tgid is an atomic 32-bit composite value made of 16 higher bits
+ * containing a refcount on tgid and the running_mask, and 16 lower bits
+ * containing a thread group ID. The tgid may only be changed when refc is zero
+ * and running may only be checked/changed when refc is held and shows the
+ * reader is alone. An FD with tgid zero belongs to nobody. For now only tgid 1
+ * is supported.
  */
 struct fdtab {
 	unsigned long running_mask;          /* mask of thread IDs currently using the fd */
@@ -162,6 +170,7 @@ struct fdtab {
 	void (*iocb)(int fd);                /* I/O handler */
 	void *owner;                         /* the connection or listener associated with this fd, NULL if closed */
 	unsigned int state;                  /* FD state for read and write directions (FD_EV_*) + FD_POLL_* */
+	unsigned int refc_tgid;              /* refcounted tgid, updated atomically */
 #ifdef DEBUG_FD
 	unsigned int event_count;            /* number of events reported */
 #endif

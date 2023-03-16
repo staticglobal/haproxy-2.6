@@ -100,12 +100,20 @@ static void _do_poll(struct poller *p, int exp, int wake)
 	for (updt_idx = 0; updt_idx < fd_nbupdt; updt_idx++) {
 		fd = fd_updt[updt_idx];
 
-		_HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
-		if (!fdtab[fd].owner) {
+		if (!fd_grab_tgid(fd, 1)) {
+			/* was reassigned */
 			activity[tid].poll_drop_fd++;
 			continue;
 		}
-		changes = _update_fd(fd, changes);
+
+		_HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
+
+		if (fdtab[fd].owner)
+			changes = _update_fd(fd, changes);
+		else
+			activity[tid].poll_drop_fd++;
+
+		fd_drop_tgid(fd);
 	}
 	/* Scan the global update list */
 	for (old_fd = fd = update_list.first; fd != -1; fd = fdtab[fd].update.next) {
@@ -117,13 +125,24 @@ static void _do_poll(struct poller *p, int exp, int wake)
 			fd = -fd -4;
 		if (fd == -1)
 			break;
-		if (fdtab[fd].update_mask & tid_bit)
-			done_update_polling(fd);
+
+		if (!fd_grab_tgid(fd, 1)) {
+			/* was reassigned */
+			activity[tid].poll_drop_fd++;
+			continue;
+		}
+
+		if (!(fdtab[fd].update_mask & tid_bit))
+			continue;
+
+		done_update_polling(fd);
+
+		if (fdtab[fd].owner)
+			changes = _update_fd(fd, changes);
 		else
-			continue;
-		if (!fdtab[fd].owner)
-			continue;
-		changes = _update_fd(fd, changes);
+			activity[tid].poll_drop_fd++;
+
+		fd_drop_tgid(fd);
 	}
 
 	thread_idle_now();
@@ -182,7 +201,6 @@ static void _do_poll(struct poller *p, int exp, int wake)
 
 	for (count = 0; count < status; count++) {
 		unsigned int n = 0;
-		int ret;
 
 		fd = kev[count].ident;
 
@@ -201,13 +219,7 @@ static void _do_poll(struct poller *p, int exp, int wake)
 				n |= FD_EV_ERR_RW;
 		}
 
-		ret = fd_update_events(fd, n);
-
-		if (ret == FD_UPDT_MIGRATED) {
-			/* FD was migrated, let's stop polling it */
-			if (!HA_ATOMIC_BTS(&fdtab[fd].update_mask, tid))
-				fd_updt[fd_nbupdt++] = fd;
-		}
+		fd_update_events(fd, n);
 	}
 }
 

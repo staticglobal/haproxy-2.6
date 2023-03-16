@@ -604,7 +604,6 @@ enum qc_mux_state {
 
 /* Flags at connection level */
 #define QUIC_FL_CONN_ANTI_AMPLIFICATION_REACHED  (1U << 0)
-#define QUIC_FL_CONN_IO_CB_WAKEUP                (1U << 1)
 #define QUIC_FL_CONN_POST_HANDSHAKE_FRAMES_BUILT (1U << 2)
 #define QUIC_FL_CONN_LISTENER                    (1U << 3)
 #define QUIC_FL_CONN_ACCEPT_REGISTERED           (1U << 4)

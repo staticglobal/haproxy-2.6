@@ -559,12 +559,15 @@ static int cli_io_handler_show_proc(struct appctx *appctx)
 	struct stconn *sc = appctx_sc(appctx);
 	struct mworker_proc *child;
 	int old = 0;
-	int up = now.tv_sec - proc_self->timestamp;
+	int up = date.tv_sec - proc_self->timestamp;
 	char *uptime = NULL;
 	char *reloadtxt = NULL;
 
 	if (unlikely(sc_ic(sc)->flags & (CF_WRITE_ERROR|CF_SHUTW)))
 		return 1;
+
+	if (up < 0) /* must never be negative because of clock drift */
+		up = 0;
 
 	chunk_reset(&trash);
 
@@ -579,7 +582,9 @@ static int cli_io_handler_show_proc(struct appctx *appctx)
 
 	chunk_appendf(&trash, "# workers\n");
 	list_for_each_entry(child, &proc_list, list) {
-		up = now.tv_sec - child->timestamp;
+		up = date.tv_sec - child->timestamp;
+		if (up < 0) /* must never be negative because of clock drift */
+			up = 0;
 
 		if (!(child->options & PROC_O_TYPE_WORKER))
 			continue;
@@ -600,7 +605,9 @@ static int cli_io_handler_show_proc(struct appctx *appctx)
 
 		chunk_appendf(&trash, "# old workers\n");
 		list_for_each_entry(child, &proc_list, list) {
-			up = now.tv_sec - child->timestamp;
+			up = date.tv_sec - child->timestamp;
+			if (up <= 0) /* must never be negative because of clock drift */
+				up = 0;
 
 			if (!(child->options & PROC_O_TYPE_WORKER))
 				continue;
@@ -618,7 +625,9 @@ static int cli_io_handler_show_proc(struct appctx *appctx)
 	chunk_appendf(&trash, "# programs\n");
 	old = 0;
 	list_for_each_entry(child, &proc_list, list) {
-		up = now.tv_sec - child->timestamp;
+		up = date.tv_sec - child->timestamp;
+		if (up < 0) /* must never be negative because of clock drift */
+			up = 0;
 
 		if (!(child->options & PROC_O_TYPE_PROG))
 			continue;
@@ -635,7 +644,9 @@ static int cli_io_handler_show_proc(struct appctx *appctx)
 	if (old) {
 		chunk_appendf(&trash, "# old programs\n");
 		list_for_each_entry(child, &proc_list, list) {
-			up = now.tv_sec - child->timestamp;
+			up = date.tv_sec - child->timestamp;
+			if (up < 0) /* must never be negative because of clock drift */
+				up = 0;
 
 			if (!(child->options & PROC_O_TYPE_PROG))
 				continue;

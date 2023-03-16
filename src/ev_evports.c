@@ -124,16 +124,24 @@ static void _do_poll(struct poller *p, int exp, int wake)
 	for (i = 0; i < fd_nbupdt; i++) {
 		fd = fd_updt[i];
 
-		_HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
-		if (fdtab[fd].owner == NULL) {
+		if (!fd_grab_tgid(fd, 1)) {
+			/* was reassigned */
 			activity[tid].poll_drop_fd++;
 			continue;
 		}
 
-		_update_fd(fd);
+		_HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
+
+		if (fdtab[fd].owner)
+			_update_fd(fd);
+		else
+			activity[tid].poll_drop_fd++;
+
+		fd_drop_tgid(fd);
 	}
 	fd_nbupdt = 0;
-	/* Scan the global update list */
+
+	/* Scan the shared update list */
 	for (old_fd = fd = update_list.first; fd != -1; fd = fdtab[fd].update.next) {
 		if (fd == -2) {
 			fd = old_fd;
@@ -143,13 +151,24 @@ static void _do_poll(struct poller *p, int exp, int wake)
 			fd = -fd -4;
 		if (fd == -1)
 			break;
-		if (fdtab[fd].update_mask & tid_bit)
-			done_update_polling(fd);
+
+		if (!fd_grab_tgid(fd, 1)) {
+			/* was reassigned */
+			activity[tid].poll_drop_fd++;
+			continue;
+		}
+
+		if (!(fdtab[fd].update_mask & tid_bit))
+			continue;
+
+		done_update_polling(fd);
+
+		if (fdtab[fd].owner)
+			_update_fd(fd);
 		else
-			continue;
-		if (!fdtab[fd].owner)
-			continue;
-		_update_fd(fd);
+			activity[tid].poll_drop_fd++;
+
+		fd_drop_tgid(fd);
 	}
 
 	thread_idle_now();
@@ -246,12 +265,9 @@ static void _do_poll(struct poller *p, int exp, int wake)
 		 */
 		ret = fd_update_events(fd, n);
 
-		/* disable polling on this instance if the FD was migrated */
-		if (ret == FD_UPDT_MIGRATED) {
-			if (!HA_ATOMIC_BTS(&fdtab[fd].update_mask, tid))
-				fd_updt[fd_nbupdt++] = fd;
+		/* polling will be on this instance if the FD was migrated */
+		if (ret == FD_UPDT_MIGRATED)
 			continue;
-		}
 
 		/*
 		 * This file descriptor was closed during the processing of

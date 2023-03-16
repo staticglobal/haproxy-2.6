@@ -458,7 +458,7 @@ int qc_snd_buf(struct quic_conn *qc, const struct buffer *buf, size_t sz,
 		             (struct sockaddr *)&qc->peer_addr, get_addr_len(&qc->peer_addr));
 	} while (ret < 0 && errno == EINTR);
 
-	if (ret < 0 || ret != sz) {
+	if (ret < 0) {
 		struct proxy *prx = qc->li->bind_conf->frontend;
 		struct quic_counters *prx_counters =
 		  EXTRA_COUNTERS_GET(prx->extra_counters_fe,
@@ -479,6 +479,9 @@ int qc_snd_buf(struct quic_conn *qc, const struct buffer *buf, size_t sz,
 
 		return 1;
 	}
+
+	if (ret != sz)
+		return 1;
 
 	/* we count the total bytes sent, and the send rate for 32-byte blocks.
 	 * The reason for the latter is that freq_ctr are limited to 4GB and
@@ -539,7 +542,10 @@ static struct task *quic_accept_run(struct task *t, void *ctx, unsigned int i)
 
 	mt_list_for_each_entry_safe(lthr, &queue->listeners, quic_accept.list, elt1, elt2) {
 		listener_accept(lthr->li);
-		MT_LIST_DELETE_SAFE(elt1);
+		if (!MT_LIST_ISEMPTY(&lthr->quic_accept.conns))
+			tasklet_wakeup((struct tasklet*)t);
+		else
+			MT_LIST_DELETE_SAFE(elt1);
 	}
 
 	return NULL;

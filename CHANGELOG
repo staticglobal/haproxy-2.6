@@ -1,6 +1,86 @@
 ChangeLog :
 ===========
 
+2023/03/10 : 2.6.10
+    - BUG/MINOR: mworker: stop doing strtok directly from the env
+    - BUG/MEDIUM: mworker: prevent inconsistent reload when upgrading from old versions
+    - BUG/MEDIUM: mworker: don't register mworker_accept_wrapper() when master FD is wrong
+    - MINOR: startup: HAPROXY_STARTUP_VERSION contains the version used to start
+    - BUG/MINOR: lua/httpclient: missing free in hlua_httpclient_send()
+    - BUG/MEDIUM: httpclient/lua: fix a race between lua GC and hlua_ctx_destroy
+    - MINOR: fd/cli: report the polling mask in "show fd"
+    - BUG/MEDIUM: stconn: Don't rearm the read expiration date if EOI was reached
+    - BUG/MINOR: sched: properly report long_rq when tasks remain in the queue
+    - BUG/MEDIUM: sched: allow a bit more TASK_HEAVY to be processed when needed
+    - BUG/MINOR: mworker: prevent incorrect values in uptime
+    - MINOR: mux-h2/traces: do not log h2s pointer for dummy streams
+    - MINOR: mux-h2/traces: add a missing TRACE_LEAVE() in h2s_frt_handle_headers()
+    - REGTESTS: Fix ssl_errors.vtc script to wait for connections close
+    - BUG/MINOR: cache: Cache response even if request has "no-cache" directive
+    - BUG/MINOR: cache: Check cache entry is complete in case of Vary
+    - BUG/MINOR: ring: do not realign ring contents on resize
+    - BUILD: thead: Fix several 32 bits compilation issues with uint64_t variables
+    - BUG/MEDIUM: h1-htx: Never copy more than the max data allowed during parsing
+    - DOC: config: Fix description of options about HTTP connection modes
+    - DOC: config: Add the missing tune.fail-alloc option from global listing
+    - DOC: config: Clarify the meaning of 'hold' in the 'resolvers' section
+    - BUG/MEDIUM: connection: Clear flags when a conn is removed from an idle list
+    - BUG/MINOR: http-check: Don't set HTX_SL_F_BODYLESS flag with a log-format body
+    - BUG/MINOR: http-check: Skip C-L header for empty body when it's not mandatory
+    - BUG/MINOR: http-ana: Don't increment conn_retries counter before the L7 retry
+    - BUG/MINOR: http-ana: Do a L7 retry on read error if there is no response
+    - BUG/MINOR: ssl: Use 'date' instead of 'now' in ocsp stapling callback
+    - MINOR: ssl: rename confusing ssl_bind_kws
+    - BUG/MINOR: config: crt-list keywords mistaken for bind ssl keywords
+    - BUG/MINOR: init: properly detect NUMA bindings on large systems
+    - BUG/MEDIUM: master: force the thread count earlier
+    - BUG/MINOR: init: make sure to always limit the total number of threads
+    - BUG/MINOR: thread: report thread and group counts in the correct order
+    - BUG/MINOR: ring: release the backing store name on exit
+    - MEDIUM: epoll: don't synchronously delete migrated FDs
+    - MEDIUM: poller: program the update in fd_update_events() for a migrated FD
+    - MAJOR: fd: remove pending updates upon real close
+    - MINOR: fd: delete unused updates on close()
+    - MEDIUM: fd: add the tgid to the fd and pass it to fd_insert()
+    - MINOR: cli/fd: show fd's tgid and refcount in "show fd"
+    - MINOR: fd: add functions to manipulate the FD's tgid
+    - MINOR: fd: add fd_get_running() to atomically return the running mask
+    - MAJOR: fd: grab the tgid before manipulating running
+    - MINOR: fd: make fd_clr_running() return the previous value instead
+    - MEDIUM: fd: make fd_insert/fd_delete atomically update fd.tgid
+    - BUG/MINOR: fd: Properly init the fd state in fd_insert()
+    - MEDIUM: fd: quit fd_update_events() when FD is closed
+    - MAJOR: poller: only touch/inspect the update_mask under tgid protection
+    - MEDIUM: fd: support broadcasting updates for foreign groups in updt_fd_polling
+    - BUG/MAJOR: fd/thread: fix race between updates and closing FD
+    - BUG/MAJOR: fd/threads: close a race on closing connections after takeover
+    - MINOR: h3/hq-interop: handle no data in decode_qcs() with FIN set
+    - BUG/MINOR: mux-quic: transfer FIN on empty STREAM frame
+    - BUG/MINOR: quic: Possible unexpected counter incrementation on send*() errors
+    - BUG/MINOR: quic: Really cancel the connection timer from qc_set_timer()
+    - BUG/MINOR: quic: Missing call to task_queue() in qc_idle_timer_do_rearm()
+    - BUG/MINOR: quic: Do not probe with too little Initial packets
+    - BUG/MINOR: quic: Wrong initialization for io_cb_wakeup boolean
+    - BUG/MINOR: quic: Do not drop too small datagrams with Initial packets
+    - BUG/MINOR: quic: Missing padding for short packets
+    - MINOR: quic: adjust request reject when MUX is already freed
+    - BUG/MINOR: quic: also send RESET_STREAM if MUX released
+    - BUG/MINOR: quic: acknowledge STREAM frame even if MUX is released
+    - BUG/MINOR: h3: prevent hypothetical demux failure on int overflow
+    - BUG/MEDIUM: quic: properly handle duplicated STREAM frames
+    - BUG/MINOR: quic: Do not send too small datagrams (with Initial packets)
+    - BUG/MINOR: quic: Ensure to be able to build datagrams to be retransmitted
+    - BUG/MINOR: quic: Remove force_ack for Initial,Handshake packets
+    - BUG/MINOR: quic: Ensure not to retransmit packets with no ack-eliciting frames
+    - BUG/MINOR: quic: Do not resend already acked frames
+    - MINOR: quic: Move code to wakeup the timer task to avoid anti-amplication deadlock
+    - BUG/MINOR: quic: Missing detections of amplification limit reached
+    - BUG/MEDIUM: quic: do not crash when handling STREAM on released MUX
+    - BUG/MINOR: mux-quic: properly init STREAM frame as not duplicated
+    - BUG/MINOR: mworker: use MASTER_MAXCONN as default maxconn value
+    - BUG/MINOR: quic: Missing listener accept queue tasklet wakeups
+    - DOC/CLEANUP: fix typos
+
 2023/02/14 : 2.6.9
     - BUG/MINOR: sink: make sure to always properly unmap a file-backed ring
     - DEV: haring: add a new option "-r" to automatically repair broken files

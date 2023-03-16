@@ -156,16 +156,24 @@ static void _do_poll(struct poller *p, int exp, int wake)
 	for (updt_idx = 0; updt_idx < fd_nbupdt; updt_idx++) {
 		fd = fd_updt[updt_idx];
 
-		_HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
-		if (!fdtab[fd].owner) {
+		if (!fd_grab_tgid(fd, 1)) {
+			/* was reassigned */
 			activity[tid].poll_drop_fd++;
 			continue;
 		}
 
-		_update_fd(fd);
+		_HA_ATOMIC_AND(&fdtab[fd].update_mask, ~tid_bit);
+
+		if (fdtab[fd].owner)
+			_update_fd(fd);
+		else
+			activity[tid].poll_drop_fd++;
+
+		fd_drop_tgid(fd);
 	}
 	fd_nbupdt = 0;
-	/* Scan the global update list */
+
+	/* Scan the shared update list */
 	for (old_fd = fd = update_list.first; fd != -1; fd = fdtab[fd].update.next) {
 		if (fd == -2) {
 			fd = old_fd;
@@ -175,13 +183,26 @@ static void _do_poll(struct poller *p, int exp, int wake)
 			fd = -fd -4;
 		if (fd == -1)
 			break;
-		if (fdtab[fd].update_mask & tid_bit)
-			done_update_polling(fd);
+
+		if (!fd_grab_tgid(fd, 1)) {
+			/* was reassigned */
+			activity[tid].poll_drop_fd++;
+			continue;
+		}
+
+		if (!(fdtab[fd].update_mask & tid_bit)) {
+			fd_drop_tgid(fd);
+			continue;
+		}
+
+		done_update_polling(fd);
+
+		if (fdtab[fd].owner)
+			_update_fd(fd);
 		else
-			continue;
-		if (!fdtab[fd].owner)
-			continue;
-		_update_fd(fd);
+			activity[tid].poll_drop_fd++;
+
+		fd_drop_tgid(fd);
 	}
 
 	thread_idle_now();
@@ -218,9 +239,7 @@ static void _do_poll(struct poller *p, int exp, int wake)
 	/* process polled events */
 
 	for (count = 0; count < status; count++) {
-		struct epoll_event ev;
 		unsigned int n, e;
-		int ret;
 
 		e = epoll_events[count].events;
 		fd = epoll_events[count].data.fd;
@@ -237,14 +256,7 @@ static void _do_poll(struct poller *p, int exp, int wake)
 		    ((e & EPOLLHUP)   ? FD_EV_SHUT_RW : 0) |
 		    ((e & EPOLLERR)   ? FD_EV_ERR_RW  : 0);
 
-		ret = fd_update_events(fd, n);
-
-		if (ret == FD_UPDT_MIGRATED) {
-			/* FD has been migrated */
-			epoll_ctl(epoll_fd[tid], EPOLL_CTL_DEL, fd, &ev);
-			_HA_ATOMIC_AND(&polled_mask[fd].poll_recv, ~tid_bit);
-			_HA_ATOMIC_AND(&polled_mask[fd].poll_send, ~tid_bit);
-		}
+		fd_update_events(fd, n);
 	}
 	/* the caller will take care of cached events */
 }
