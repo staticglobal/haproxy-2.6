@@ -1,6 +1,32 @@
 ChangeLog :
 ===========
 
+2023/03/17 : 2.6.11
+    - BUG/MEDIUM: proxy: properly stop backends on soft-stop
+    - BUG/MEDIUM: resolvers: Properly stop server resolutions on soft-stop
+    - DEBUG: cli/show_fd: Display connection error code
+    - DEBUG: ssl-sock/show_fd: Display SSL error code
+    - BUG/MINOR: tcp_sample: fix a bug in fc_dst_port and fc_dst_is_local sample fetches
+    - BUG/MINOR: quic: Missing STREAM frame length updates
+    - BUG/MEDIUM: connection: Preserve flags when a conn is removed from an idle list
+    - BUG/MINOR: mux-h2: make sure the h2c task exists before refreshing it
+    - MINOR: buffer: add br_single() to check if a buffer ring has more than one buf
+    - BUG/MEDIUM: mux-h2: only restart sending when mux buffer is decongested
+    - BUG/MINOR: mux-h2: set CO_SFL_STREAMER when sending lots of data
+    - BUG/MINOR: quic: Missing STREAM frame data pointer updates
+    - BUG/MEDIUM: listener: duplicate inherited FDs if needed
+    - MINOR: h2: add h2_phdr_to_ist() to make ISTs from pseudo headers
+    - MEDIUM: mux-h2/trace: add tracing support for headers
+    - BUG/MINOR: mux-h2: Fix possible null pointer deref on h2c in _h2_trace_header()
+    - BUG/MEDIUM: spoe: Don't set the default traget for the SPOE agent frontend
+    - BUG/MINOR: proto_ux: report correct error when bind_listener fails
+    - BUG/MINOR: protocol: fix minor memory leak in protocol_bind_all()
+    - BUG/MINOR: sock_unix: match finalname with tempname in sock_unix_addrcmp()
+    - MINOR: trace: add a TRACE_ENABLED() macro to determine if a trace is active
+    - MINOR: trace: add a trace_no_cb() dummy callback for when to use no callback
+    - MINOR: trace: add the long awaited TRACE_PRINTF()
+    - BUG/MAJOR: qpack: fix possible read out of bounds in static table
+
 2023/03/10 : 2.6.10
     - BUG/MINOR: mworker: stop doing strtok directly from the env
     - BUG/MEDIUM: mworker: prevent inconsistent reload when upgrading from old versions

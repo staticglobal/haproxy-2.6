@@ -176,5 +176,18 @@ static inline struct quic_err quic_err_app(uint64_t code)
 	return (struct quic_err){ .code = code, .app = 1 };
 }
 
+/* Move forward <strm> STREAM frame by <data> bytes. */
+static inline void qc_stream_frm_mv_fwd(struct quic_stream *strm, uint64_t data)
+{
+	struct buffer cf_buf;
+
+	strm->offset.key += data;
+	strm->len -= data;
+	cf_buf = b_make(b_orig(strm->buf),
+	                b_size(strm->buf),
+	                (char *)strm->data - b_orig(strm->buf), 0);
+	strm->data = (unsigned char *)b_peek(&cf_buf, data);
+}
+
 #endif /* USE_QUIC */
 #endif /* _HAPROXY_QUIC_FRAME_H */
