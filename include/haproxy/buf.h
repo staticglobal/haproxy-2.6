@@ -1000,6 +1000,15 @@ static inline unsigned int br_full(const struct buffer *r)
 	return r->data + 1 == r->head || r->data + 1 == r->head - 1 + r->size;
 }
 
+
+/* Returns true if a single buffer is assigned */
+static inline unsigned int br_single(const struct buffer *r)
+{
+	BUG_ON_HOT(r->area != BUF_RING.area);
+
+	return r->data == r->head;
+}
+
 /* Returns the index of the ring's head buffer */
 static inline unsigned int br_head_idx(const struct buffer *r)
 {

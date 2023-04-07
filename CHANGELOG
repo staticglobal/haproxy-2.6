@@ -1,6 +1,53 @@
 ChangeLog :
 ===========
 
+2023/03/28 : 2.6.12
+    - BUG/MAJOR: poller: drop FD's tgid when masks don't match
+    - OPTIM: mux-h1: limit first read size to avoid wrapping
+    - BUG/MEDIUM: stream: do not try to free a failed stream-conn
+    - BUG/MEDIUM: mux-h2: do not try to free an unallocated h2s->sd
+    - BUG/MEDIUM: mux-h2: erase h2c->wait_event.tasklet on error path
+    - BUG/MEDIUM: stconn: don't set the type before allocation succeeds
+    - BUG/MINOR: stconn: fix sedesc memory leak on stream allocation failure
+    - BUG/MEDIUM: mux-h1: properly destroy a partially allocated h1s
+    - BUG/MEDIUM: applet: only set appctx->sedesc on successful allocation
+    - BUG/MINOR: quic: wake up MUX on probing only for 01RTT
+    - BUG/MINOR: trace: fix hardcoded level for TRACE_PRINTF
+    - BUG/MEDIUM: mux-quic: release data from conn flow-control on qcs reset
+    - BUG/MINOR: h3: properly handle incomplete remote uni stream type
+    - BUG/MINOR: mux-quic: prevent CC status to be erased by shutdown
+    - BUG/MEDIUM: stats: Consume the request except when parsing the POST payload
+    - DOC: config: set-var() dconv rendering issues
+    - BUG/MEDIUM: mux-h1: Wakeup H1C on shutw if there is no I/O subscription
+    - BUG/MINOR: applet/new: fix sedesc freeing logic
+    - BUG/MINOR: quic: Missing STREAM frame type updated
+
+2023/03/17 : 2.6.11
+    - BUG/MEDIUM: proxy: properly stop backends on soft-stop
+    - BUG/MEDIUM: resolvers: Properly stop server resolutions on soft-stop
+    - DEBUG: cli/show_fd: Display connection error code
+    - DEBUG: ssl-sock/show_fd: Display SSL error code
+    - BUG/MINOR: tcp_sample: fix a bug in fc_dst_port and fc_dst_is_local sample fetches
+    - BUG/MINOR: quic: Missing STREAM frame length updates
+    - BUG/MEDIUM: connection: Preserve flags when a conn is removed from an idle list
+    - BUG/MINOR: mux-h2: make sure the h2c task exists before refreshing it
+    - MINOR: buffer: add br_single() to check if a buffer ring has more than one buf
+    - BUG/MEDIUM: mux-h2: only restart sending when mux buffer is decongested
+    - BUG/MINOR: mux-h2: set CO_SFL_STREAMER when sending lots of data
+    - BUG/MINOR: quic: Missing STREAM frame data pointer updates
+    - BUG/MEDIUM: listener: duplicate inherited FDs if needed
+    - MINOR: h2: add h2_phdr_to_ist() to make ISTs from pseudo headers
+    - MEDIUM: mux-h2/trace: add tracing support for headers
+    - BUG/MINOR: mux-h2: Fix possible null pointer deref on h2c in _h2_trace_header()
+    - BUG/MEDIUM: spoe: Don't set the default traget for the SPOE agent frontend
+    - BUG/MINOR: proto_ux: report correct error when bind_listener fails
+    - BUG/MINOR: protocol: fix minor memory leak in protocol_bind_all()
+    - BUG/MINOR: sock_unix: match finalname with tempname in sock_unix_addrcmp()
+    - MINOR: trace: add a TRACE_ENABLED() macro to determine if a trace is active
+    - MINOR: trace: add a trace_no_cb() dummy callback for when to use no callback
+    - MINOR: trace: add the long awaited TRACE_PRINTF()
+    - BUG/MAJOR: qpack: fix possible read out of bounds in static table
+
 2023/03/10 : 2.6.10
     - BUG/MINOR: mworker: stop doing strtok directly from the env
     - BUG/MEDIUM: mworker: prevent inconsistent reload when upgrading from old versions

@@ -994,6 +994,80 @@ static int h2_avail_streams(struct connection *conn)
 	return ret1;
 }
 
+/* inconditionally produce a trace of the header. Please do not call this one
+ * and use h2_trace_header() instead which first checks if traces are enabled.
+ */
+void _h2_trace_header(const struct ist hn, const struct ist hv,
+		      uint64_t mask, const struct ist trc_loc, const char *func,
+		      const struct h2c *h2c, const struct h2s *h2s)
+{
+	struct ist n_ist, v_ist;
+	const char *c_str, *s_str;
+
+	chunk_reset(&trash);
+	c_str = chunk_newstr(&trash);
+	if (h2c) {
+		chunk_appendf(&trash, "h2c=%p(%c,%s) ",
+			      h2c, (h2c->flags & H2_CF_IS_BACK) ? 'B' : 'F', h2c_st_to_str(h2c->st0));
+	}
+
+	s_str = chunk_newstr(&trash);
+	if (h2s) {
+		if (h2s->id <= 0)
+			chunk_appendf(&trash, "dsi=%d ", h2s->h2c->dsi);
+		chunk_appendf(&trash, "h2s=%p(%d,%s) ", h2s, h2s->id, h2s_st_to_str(h2s->st));
+	}
+	else if (h2c)
+		chunk_appendf(&trash, "dsi=%d ", h2c->dsi);
+
+	n_ist = ist2(chunk_newstr(&trash), 0);
+	istscpy(&n_ist, hn, 256);
+	trash.data += n_ist.len;
+	if (n_ist.len != hn.len)
+		chunk_appendf(&trash, " (... +%ld)", (long)(hn.len - n_ist.len));
+
+	v_ist = ist2(chunk_newstr(&trash), 0);
+	istscpy(&v_ist, hv, 1024);
+	trash.data += v_ist.len;
+	if (v_ist.len != hv.len)
+		chunk_appendf(&trash, " (... +%ld)", (long)(hv.len - v_ist.len));
+
+	TRACE_PRINTF_LOC(TRACE_LEVEL_USER, mask, trc_loc, func,
+	                 (h2c ? h2c->conn : 0), 0, 0, 0,
+	                 "%s%s%s %s: %s", c_str, s_str,
+	                 (mask & H2_EV_TX_HDR) ? "sndh" : "rcvh",
+	                 n_ist.ptr, v_ist.ptr);
+}
+
+/* produce a trace of the header after checking that tracing is enabled */
+static inline void h2_trace_header(const struct ist hn, const struct ist hv,
+				   uint64_t mask, const struct ist trc_loc, const char *func,
+				   const struct h2c *h2c, const struct h2s *h2s)
+{
+	if ((TRACE_SOURCE)->verbosity >= H2_VERB_ADVANCED &&
+	    TRACE_ENABLED(TRACE_LEVEL_USER, mask, h2c ? h2c->conn : 0, h2s, 0, 0))
+		_h2_trace_header(hn, hv, mask, trc_loc, func, h2c, h2s);
+}
+
+/* hpack-encode header name <hn> and value <hv>, possibly emitting a trace if
+ * currently enabled. This is done on behalf of function <func> at <trc_loc>
+ * passed as ist(TRC_LOC), h2c <h2c>, and h2s <h2s>, all of which may be NULL.
+ * The trace is only emitted if the header is emitted (in which case non-zero
+ * is returned). The trash is modified. In the traces, the header's name will
+ * be truncated to 256 chars and the header's value to 1024 chars.
+ */
+static inline int h2_encode_header(struct buffer *buf, const struct ist hn, const struct ist hv,
+				   uint64_t mask, const struct ist trc_loc, const char *func,
+				   const struct h2c *h2c, const struct h2s *h2s)
+{
+	int ret;
+
+	ret = hpack_encode_header(buf, hn, hv);
+	if (ret)
+		h2_trace_header(hn, hv, mask, trc_loc, func, h2c, h2s);
+
+	return ret;
+}
 
 /*****************************************************************/
 /* functions below are dedicated to the mux setup and management */
@@ -1038,6 +1112,7 @@ static int h2_init(struct connection *conn, struct proxy *prx, struct session *s
 
 	h2c->proxy = prx;
 	h2c->task = NULL;
+	h2c->wait_event.tasklet = NULL;
 	h2c->idle_start = now_ms;
 	if (tick_isset(h2c->timeout)) {
 		t = task_new_here();
@@ -1485,7 +1560,9 @@ static int h2_fragment_headers(struct buffer *b, uint32_t mfs)
 
 /* marks stream <h2s> as CLOSED and decrement the number of active streams for
  * its connection if the stream was not yet closed. Please use this exclusively
- * before closing a stream to ensure stream count is well maintained.
+ * before closing a stream to ensure stream count is well maintained. Note that
+ * it does explicitly support being called with a partially initialized h2s
+ * (e.g. sd==NULL).
  */
 static inline void h2s_close(struct h2s *h2s)
 {
@@ -1494,7 +1571,7 @@ static inline void h2s_close(struct h2s *h2s)
 		h2s->h2c->nb_streams--;
 		if (!h2s->id)
 			h2s->h2c->nb_reserved--;
-		if (h2s_sc(h2s)) {
+		if (h2s->sd && h2s_sc(h2s)) {
 			if (!se_fl_test(h2s->sd, SE_FL_EOS) && !b_data(&h2s->rxbuf))
 				h2s_notify_recv(h2s);
 		}
@@ -3948,6 +4025,16 @@ static int h2_send(struct h2c *h2c)
 		if (h2c->flags & (H2_CF_MUX_MFULL | H2_CF_DEM_MBUSY | H2_CF_DEM_MROOM))
 			flags |= CO_SFL_MSG_MORE;
 
+		if (!br_single(h2c->mbuf)) {
+			/* usually we want to emit small TLS records to speed
+			 * up the decoding on the client. That's what is being
+			 * done by default. However if there is more than one
+			 * buffer being allocated, we're streaming large data
+			 * so we stich to large records.
+			 */
+			flags |= CO_SFL_STREAMER;
+		}
+
 		for (buf = br_head(h2c->mbuf); b_size(buf); buf = br_del_head(h2c->mbuf)) {
 			if (b_data(buf)) {
 				int ret = conn->xprt->snd_buf(conn, conn->xprt_ctx, buf, b_data(buf), flags);
@@ -3970,8 +4057,17 @@ static int h2_send(struct h2c *h2c)
 		if (released)
 			offer_buffers(NULL, released);
 
-		/* wrote at least one byte, the buffer is not full anymore */
-		if (sent)
+		/* Normally if wrote at least one byte, the buffer is not full
+		 * anymore. However, if it was marked full because all of its
+		 * buffers were used, we don't want to instantly wake up many
+		 * streams because we'd create a thundering herd effect, notably
+		 * when data are flushed in small chunks. Instead we wait for
+		 * the buffer to be decongested again before allowing to send
+		 * again. It also has the added benefit of not pumping more
+		 * data from the other side when it's known that this one is
+		 * still congested.
+		 */
+		if (sent && br_single(h2c->mbuf))
 			h2c->flags &= ~(H2_CF_MUX_MFULL | H2_CF_DEM_MROOM);
 	}
 
@@ -4027,11 +4123,10 @@ struct task *h2_io_cb(struct task *t, void *ctx, unsigned int state)
 		conn = h2c->conn;
 		TRACE_ENTER(H2_EV_H2C_WAKE, conn);
 
-		conn_in_list = conn->flags & CO_FL_LIST_MASK;
-
 		/* Remove the connection from the list, to be sure nobody attempts
 		 * to use it while we handle the I/O events
 		 */
+		conn_in_list = conn_get_idle_flag(conn);
 		if (conn_in_list)
 			conn_delete_from_tree(&conn->hash_node->node);
 
@@ -4163,7 +4258,6 @@ static int h2_process(struct h2c *h2c)
 		if (conn->flags & CO_FL_LIST_MASK) {
 			HA_SPIN_LOCK(IDLE_CONNS_LOCK, &idle_conns[tid].idle_conns_lock);
 			conn_delete_from_tree(&conn->hash_node->node);
-			conn->flags &= ~CO_FL_LIST_MASK;
 			HA_SPIN_UNLOCK(IDLE_CONNS_LOCK, &idle_conns[tid].idle_conns_lock);
 		}
 	}
@@ -4172,7 +4266,6 @@ static int h2_process(struct h2c *h2c)
 		if (conn->flags & CO_FL_LIST_MASK) {
 			HA_SPIN_LOCK(IDLE_CONNS_LOCK, &idle_conns[tid].idle_conns_lock);
 			conn_delete_from_tree(&conn->hash_node->node);
-			conn->flags &= ~CO_FL_LIST_MASK;
 			HA_SPIN_UNLOCK(IDLE_CONNS_LOCK, &idle_conns[tid].idle_conns_lock);
 		}
 	}
@@ -4253,10 +4346,8 @@ struct task *h2_timeout_task(struct task *t, void *context, unsigned int state)
 		/* We're about to destroy the connection, so make sure nobody attempts
 		 * to steal it from us.
 		 */
-		if (h2c->conn->flags & CO_FL_LIST_MASK) {
+		if (h2c->conn->flags & CO_FL_LIST_MASK)
 			conn_delete_from_tree(&h2c->conn->hash_node->node);
-			h2c->conn->flags &= ~CO_FL_LIST_MASK;
-		}
 
 		HA_SPIN_UNLOCK(IDLE_CONNS_LOCK, &idle_conns[tid].idle_conns_lock);
 	}
@@ -4309,7 +4400,6 @@ do_leave:
 	if (h2c->conn->flags & CO_FL_LIST_MASK) {
 		HA_SPIN_LOCK(IDLE_CONNS_LOCK, &idle_conns[tid].idle_conns_lock);
 		conn_delete_from_tree(&h2c->conn->hash_node->node);
-		h2c->conn->flags &= ~CO_FL_LIST_MASK;
 		HA_SPIN_UNLOCK(IDLE_CONNS_LOCK, &idle_conns[tid].idle_conns_lock);
 	}
 
@@ -4451,7 +4541,7 @@ static void h2_detach(struct sedesc *sd)
 		/* refresh the timeout if none was active, so that the last
 		 * leaving stream may arm it.
 		 */
-		if (!tick_isset(h2c->task->expire))
+		if (h2c->task && !tick_isset(h2c->task->expire))
 			h2c_update_timeout(h2c);
 		return;
 	}
@@ -4941,6 +5031,26 @@ next_frame:
 	/* past this point we cannot roll back in case of error */
 	outlen = hpack_decode_frame(h2c->ddht, hdrs, flen, list,
 	                            sizeof(list)/sizeof(list[0]), tmp);
+
+	if (outlen > 0 &&
+	    (TRACE_SOURCE)->verbosity >= H2_VERB_ADVANCED &&
+	    TRACE_ENABLED(TRACE_LEVEL_USER, H2_EV_RX_FRAME|H2_EV_RX_HDR, h2c->conn, 0, 0, 0)) {
+		struct ist n;
+		int i;
+
+		for (i = 0; list[i].n.len; i++) {
+			n = list[i].n;
+
+			if (!isttest(n)) {
+				/* this is in fact a pseudo header whose number is in n.len */
+				n = h2_phdr_to_ist(n.len);
+			}
+
+			h2_trace_header(n, list[i].v, H2_EV_RX_FRAME|H2_EV_RX_HDR,
+			                ist(TRC_LOC), __FUNCTION__, h2c, NULL);
+		}
+	}
+
 	if (outlen < 0) {
 		TRACE_STATE("failed to decompress HPACK", H2_EV_RX_FRAME|H2_EV_RX_HDR|H2_EV_H2C_ERR|H2_EV_PROTO_ERR, h2c->conn);
 		h2c_error(h2c, H2_ERR_COMPRESSION_ERROR);
@@ -5332,6 +5442,14 @@ static size_t h2s_frt_make_resp_headers(struct h2s *h2s, struct htx *htx)
 		goto full;
 	}
 
+	if ((TRACE_SOURCE)->verbosity >= H2_VERB_ADVANCED) {
+		char sts[4];
+
+		h2_trace_header(ist(":status"), ist(ultoa_r(h2s->status, sts, sizeof(sts))),
+				    H2_EV_TX_FRAME|H2_EV_TX_HDR, ist(TRC_LOC), __FUNCTION__,
+				    h2c, h2s);
+	}
+
 	/* encode all headers, stop at empty name */
 	for (hdr = 0; hdr < sizeof(list)/sizeof(list[0]); hdr++) {
 		/* these ones do not exist in H2 and must be dropped. */
@@ -5349,7 +5467,8 @@ static size_t h2s_frt_make_resp_headers(struct h2s *h2s, struct htx *htx)
 		if (isteq(list[hdr].n, ist("")))
 			break; // end
 
-		if (!hpack_encode_header(&outbuf, list[hdr].n, list[hdr].v)) {
+		if (!h2_encode_header(&outbuf, list[hdr].n, list[hdr].v, H2_EV_TX_FRAME|H2_EV_TX_HDR,
+		                      ist(TRC_LOC), __FUNCTION__, h2c, h2s)) {
 			/* output full */
 			if (b_space_wraps(mbuf))
 				goto realign_again;
@@ -5616,6 +5735,8 @@ static size_t h2s_bck_make_req_headers(struct h2s *h2s, struct htx *htx)
 		goto full;
 	}
 
+	h2_trace_header(ist(":method"), meth, H2_EV_TX_FRAME|H2_EV_TX_HDR, ist(TRC_LOC), __FUNCTION__, h2c, h2s);
+
 	auth = ist(NULL);
 
 	/* RFC7540 #8.3: the CONNECT method must have :
@@ -5629,12 +5750,14 @@ static size_t h2s_bck_make_req_headers(struct h2s *h2s, struct htx *htx)
 	if (unlikely(sl->info.req.meth == HTTP_METH_CONNECT) && !extended_connect) {
 		auth = uri;
 
-		if (!hpack_encode_header(&outbuf, ist(":authority"), auth)) {
+		if (!h2_encode_header(&outbuf, ist(":authority"), auth, H2_EV_TX_FRAME|H2_EV_TX_HDR,
+		                      ist(TRC_LOC), __FUNCTION__, h2c, h2s)) {
 			/* output full */
 			if (b_space_wraps(mbuf))
 				goto realign_again;
 			goto full;
 		}
+
 		h2s->flags |= H2_SF_BODY_TUNNEL;
 	} else {
 		/* other methods need a :scheme. If an authority is known from
@@ -5694,7 +5817,9 @@ static size_t h2s_bck_make_req_headers(struct h2s *h2s, struct htx *htx)
 			goto full;
 		}
 
-		if (auth.len && !hpack_encode_header(&outbuf, ist(":authority"), auth)) {
+		if (auth.len &&
+		    !h2_encode_header(&outbuf, ist(":authority"), auth, H2_EV_TX_FRAME|H2_EV_TX_HDR,
+		                      ist(TRC_LOC), __FUNCTION__, h2c, h2s)) {
 			/* output full */
 			if (b_space_wraps(mbuf))
 				goto realign_again;
@@ -5718,15 +5843,16 @@ static size_t h2s_bck_make_req_headers(struct h2s *h2s, struct htx *htx)
 			goto full;
 		}
 
+		h2_trace_header(ist(":path"), uri, H2_EV_TX_FRAME|H2_EV_TX_HDR, ist(TRC_LOC), __FUNCTION__, h2c, h2s);
+
 		/* encode the pseudo-header protocol from rfc8441 if using
 		 * Extended CONNECT method.
 		 */
 		if (unlikely(extended_connect)) {
 			const struct ist protocol = ist(h2s->upgrade_protocol);
 			if (isttest(protocol)) {
-				if (!hpack_encode_header(&outbuf,
-				                         ist(":protocol"),
-				                         protocol)) {
+				if (!h2_encode_header(&outbuf, ist(":protocol"), protocol, H2_EV_TX_FRAME|H2_EV_TX_HDR,
+				                      ist(TRC_LOC), __FUNCTION__, h2c, h2s)) {
 					/* output full */
 					if (b_space_wraps(mbuf))
 						goto realign_again;
@@ -5769,7 +5895,7 @@ static size_t h2s_bck_make_req_headers(struct h2s *h2s, struct htx *htx)
 		if (isteq(n, ist("")))
 			break; // end
 
-		if (!hpack_encode_header(&outbuf, n, v)) {
+		if (!h2_encode_header(&outbuf, n, v, H2_EV_TX_FRAME|H2_EV_TX_HDR, ist(TRC_LOC), __FUNCTION__, h2c, h2s)) {
 			/* output full */
 			if (b_space_wraps(mbuf))
 				goto realign_again;
@@ -6338,7 +6464,8 @@ static size_t h2s_make_trailers(struct h2s *h2s, struct htx *htx)
 		if (*(list[idx].n.ptr) == ':')
 			continue;
 
-		if (!hpack_encode_header(&outbuf, list[idx].n, list[idx].v)) {
+		if (!h2_encode_header(&outbuf, list[idx].n, list[idx].v, H2_EV_TX_FRAME|H2_EV_TX_HDR,
+		                      ist(TRC_LOC), __FUNCTION__, h2c, h2s)) {
 			/* output full */
 			if (b_space_wraps(mbuf))
 				goto realign_again;

@@ -2200,6 +2200,7 @@ struct task *hard_stop(struct task *t, void *context, unsigned int state)
 /* perform the soft-stop right now (i.e. unbind listeners) */
 static void do_soft_stop_now()
 {
+	struct proxy *p;
 	struct task *task;
 
 	/* disable busy polling to avoid cpu eating for the new process */
@@ -2223,6 +2224,15 @@ static void do_soft_stop_now()
 
 	/* stop all stoppable listeners */
 	protocol_stop_now();
+
+	/* Loop on proxies to stop backends */
+	p = proxies_list;
+	while (p) {
+		HA_RWLOCK_WRLOCK(PROXY_LOCK, &p->lock);
+		proxy_cond_disable(p);
+		HA_RWLOCK_WRUNLOCK(PROXY_LOCK, &p->lock);
+		p = p->next;
+	}
 
 	/* signal zero is used to broadcast the "stopping" event */
 	signal_handler(0);

@@ -93,7 +93,21 @@ int sock_unix_addrcmp(const struct sockaddr_storage *a, const struct sockaddr_st
 
 	/* Now we have a difference. It's OK if they are within or after a
 	 * sequence of digits following a dot, and are followed by ".tmp".
+	 *
+	 * make sure to perform the check against tempname if the compared
+	 * string is in "final" format (does not end with ".XXXX.tmp").
+	 *
+	 * Examples:
+	 *     /tmp/test matches with /tmp/test.1822.tmp
+	 *     /tmp/test.1822.tmp matches with /tmp/test.XXXX.tmp
 	 */
+	if (au->sun_path[idx] == 0 || bu->sun_path[idx] == 0) {
+		if (au->sun_path[idx] == '.' || bu->sun_path[idx] == '.')
+			dot = idx; /* try to match against temp path */
+		else
+			return -1; /* invalid temp path */
+	}
+
 	if (!dot)
 		return -1;
 
@@ -226,6 +240,24 @@ int sock_unix_bind_receiver(struct receiver *rx, char **errmsg)
 	}
 
  fd_ready:
+	if (ext && fd < global.maxsock && fdtab[fd].owner) {
+		/* This FD was already bound so this means that it was already
+		 * known and registered before parsing, hence it's an inherited
+		 * FD. The only reason why it's already known here is that it
+		 * has been registered multiple times (multiple listeners on the
+		 * same, or a "shards" directive on the line). There cannot be
+		 * multiple listeners on one FD but at least we can create a
+		 * new one from the original one. We won't reconfigure it,
+		 * however, as this was already done for the first one.
+		 */
+		fd = dup(fd);
+		if (fd == -1) {
+			err |= ERR_RETRYABLE | ERR_ALERT;
+			memprintf(errmsg, "cannot dup() receiving socket (%s)", strerror(errno));
+			goto bind_return;
+		}
+	}
+
 	if (fd >= global.maxsock) {
 		err |= ERR_FATAL | ERR_ABORT | ERR_ALERT;
 		memprintf(errmsg, "not enough free sockets (raise '-n' parameter)");

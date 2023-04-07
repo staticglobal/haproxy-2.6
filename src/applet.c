@@ -46,18 +46,20 @@ struct appctx *appctx_new(struct applet *applet, struct sedesc *sedesc, unsigned
 	appctx->obj_type = OBJ_TYPE_APPCTX;
 	appctx->applet = applet;
 	appctx->sess = NULL;
-	if (!sedesc) {
-		sedesc = sedesc_new();
-		if (!sedesc)
-			goto fail_endp;
-		sedesc->se = appctx;
-		se_fl_set(sedesc, SE_FL_T_APPLET | SE_FL_ORPHAN);
-	}
-	appctx->sedesc = sedesc;
 
 	appctx->t = task_new(thread_mask);
 	if (unlikely(!appctx->t))
 		goto fail_task;
+
+	if (!sedesc) {
+		sedesc = sedesc_new();
+		if (unlikely(!sedesc))
+			goto fail_endp;
+		sedesc->se = appctx;
+		se_fl_set(sedesc, SE_FL_T_APPLET | SE_FL_ORPHAN);
+	}
+
+	appctx->sedesc = sedesc;
 	appctx->t->process = task_run_applet;
 	appctx->t->context = appctx;
 
@@ -68,9 +70,9 @@ struct appctx *appctx_new(struct applet *applet, struct sedesc *sedesc, unsigned
 	_HA_ATOMIC_INC(&nb_applets);
 	return appctx;
 
-  fail_task:
-	sedesc_free(appctx->sedesc);
   fail_endp:
+	task_destroy(appctx->t);
+  fail_task:
 	pool_free(pool_head_appctx, appctx);
   fail_appctx:
 	return NULL;

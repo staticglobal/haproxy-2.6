@@ -6481,7 +6481,7 @@ struct task *ssl_sock_io_cb(struct task *t, void *context, unsigned int state)
 			return NULL;
 		}
 		conn = ctx->conn;
-		conn_in_list = conn->flags & CO_FL_LIST_MASK;
+		conn_in_list = conn_get_idle_flag(conn);
 		if (conn_in_list)
 			conn_delete_from_tree(&conn->hash_node->node);
 		HA_SPIN_UNLOCK(IDLE_CONNS_LOCK, &idle_conns[tid].idle_conns_lock);
@@ -7282,7 +7282,7 @@ static int ssl_sock_show_fd(struct buffer *buf, const struct connection *conn, c
 		chunk_appendf(&trash, " xctx.conn=%p(BOGUS)", sctx->conn);
 		ret = 1;
 	}
-	chunk_appendf(&trash, " xctx.st=%d", sctx->xprt_st);
+	chunk_appendf(&trash, " xctx.st=%d .err=%ld", sctx->xprt_st, sctx->error_code);
 
 	if (sctx->xprt) {
 		chunk_appendf(&trash, " .xprt=%s", sctx->xprt->name);

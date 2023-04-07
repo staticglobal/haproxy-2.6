@@ -1854,7 +1854,9 @@ static inline void qc_requeue_nacked_pkt_tx_frms(struct quic_conn *qc,
 				continue;
 			}
 			else if (strm_frm->offset.key < stream_desc->ack_offset) {
-				strm_frm->offset.key = stream_desc->ack_offset;
+				uint64_t diff = stream_desc->ack_offset - strm_frm->offset.key;
+
+				qc_stream_frm_mv_fwd(frm, diff);
 				TRACE_DEVEL("updated partially acked frame",
 				            QUIC_EV_CONN_PRSAFRM, qc, frm);
 			}
@@ -2500,7 +2502,9 @@ static void qc_dup_pkt_frms(struct quic_conn *qc,
 				continue;
 			}
 			else if (strm_frm->offset.key < stream_desc->ack_offset) {
-				strm_frm->offset.key = stream_desc->ack_offset;
+				uint64_t diff = stream_desc->ack_offset - strm_frm->offset.key;
+
+				qc_stream_frm_mv_fwd(frm, diff);
 				TRACE_DEVEL("updated partially acked frame",
 				            QUIC_EV_CONN_PRSAFRM, qc, frm);
 			}
@@ -4811,44 +4815,45 @@ struct task *qc_process_timer(struct task *task, void *ctx, unsigned int state)
 
 	if (qc->path->in_flight) {
 		pktns = quic_pto_pktns(qc, qc->state >= QUIC_HS_ST_CONFIRMED, NULL);
-		if (qc->subs && qc->subs->events & SUB_RETRY_SEND) {
-			pktns->tx.pto_probe = QUIC_MAX_NB_PTO_DGRAMS;
-			tasklet_wakeup(qc->subs->tasklet);
-			qc->subs->events &= ~SUB_RETRY_SEND;
-			if (!qc->subs->events)
-				qc->subs = NULL;
+		if (pktns == &qc->pktns[QUIC_TLS_PKTNS_INITIAL]) {
+			if (qc_may_probe_ipktns(qc)) {
+				qc->flags |= QUIC_FL_CONN_RETRANS_NEEDED;
+				pktns->flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
+				TRACE_STATE("needs to probe Initial packet number space", QUIC_EV_CONN_TXPKT, qc);
+			}
+			else {
+				TRACE_STATE("Cannot probe Initial packet number space", QUIC_EV_CONN_TXPKT, qc);
+			}
+			if (qc->pktns[QUIC_TLS_PKTNS_HANDSHAKE].tx.in_flight) {
+				qc->flags |= QUIC_FL_CONN_RETRANS_NEEDED;
+				qc->pktns[QUIC_TLS_PKTNS_HANDSHAKE].flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
+				TRACE_STATE("needs to probe Handshake packet number space", QUIC_EV_CONN_TXPKT, qc);
+			}
 		}
-		else {
-			if (pktns == &qc->pktns[QUIC_TLS_PKTNS_INITIAL]) {
+		else if (pktns == &qc->pktns[QUIC_TLS_PKTNS_HANDSHAKE]) {
+			TRACE_STATE("needs to probe Handshake packet number space", QUIC_EV_CONN_TXPKT, qc);
+			qc->flags |= QUIC_FL_CONN_RETRANS_NEEDED;
+			pktns->flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
+			if (qc->pktns[QUIC_TLS_PKTNS_INITIAL].tx.in_flight) {
 				if (qc_may_probe_ipktns(qc)) {
-					qc->flags |= QUIC_FL_CONN_RETRANS_NEEDED;
-					pktns->flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
+					qc->pktns[QUIC_TLS_PKTNS_INITIAL].flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
 					TRACE_STATE("needs to probe Initial packet number space", QUIC_EV_CONN_TXPKT, qc);
 				}
 				else {
 					TRACE_STATE("Cannot probe Initial packet number space", QUIC_EV_CONN_TXPKT, qc);
 				}
-				if (qc->pktns[QUIC_TLS_PKTNS_HANDSHAKE].tx.in_flight) {
-					qc->flags |= QUIC_FL_CONN_RETRANS_NEEDED;
-					qc->pktns[QUIC_TLS_PKTNS_HANDSHAKE].flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
-					TRACE_STATE("needs to probe Handshake packet number space", QUIC_EV_CONN_TXPKT, qc);
-				}
 			}
-			else if (pktns == &qc->pktns[QUIC_TLS_PKTNS_HANDSHAKE]) {
-				TRACE_STATE("needs to probe Handshake packet number space", QUIC_EV_CONN_TXPKT, qc);
-				qc->flags |= QUIC_FL_CONN_RETRANS_NEEDED;
-				pktns->flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
-				if (qc->pktns[QUIC_TLS_PKTNS_INITIAL].tx.in_flight) {
-					if (qc_may_probe_ipktns(qc)) {
-						qc->pktns[QUIC_TLS_PKTNS_INITIAL].flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
-						TRACE_STATE("needs to probe Initial packet number space", QUIC_EV_CONN_TXPKT, qc);
-					}
-					else {
-						TRACE_STATE("Cannot probe Initial packet number space", QUIC_EV_CONN_TXPKT, qc);
-					}
-				}
+		}
+		else if (pktns == &qc->pktns[QUIC_TLS_PKTNS_01RTT]) {
+			/* Wake up upper layer if waiting to send new data. */
+			if (qc->subs && qc->subs->events & SUB_RETRY_SEND) {
+				pktns->tx.pto_probe = QUIC_MAX_NB_PTO_DGRAMS;
+				tasklet_wakeup(qc->subs->tasklet);
+				qc->subs->events &= ~SUB_RETRY_SEND;
+				if (!qc->subs->events)
+					qc->subs = NULL;
 			}
-			else if (pktns == &qc->pktns[QUIC_TLS_PKTNS_01RTT]) {
+			else {
 				TRACE_STATE("needs to probe 01RTT packet number space", QUIC_EV_CONN_TXPKT, qc);
 				qc->flags |= QUIC_FL_CONN_RETRANS_NEEDED;
 				pktns->flags |= QUIC_FL_PKTNS_PROBE_NEEDED;
@@ -6807,7 +6812,9 @@ static inline int qc_build_frms(struct list *outlist, struct list *inlist,
 					continue;
 				}
 				else if (strm->offset.key < stream_desc->ack_offset) {
-					strm->offset.key = stream_desc->ack_offset;
+					uint64_t diff = stream_desc->ack_offset - strm->offset.key;
+
+					qc_stream_frm_mv_fwd(cf, diff);
 					TRACE_DEVEL("updated partially acked frame",
 					            QUIC_EV_CONN_PRSAFRM, qc, cf);
 				}
