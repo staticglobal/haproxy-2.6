@@ -4687,6 +4687,20 @@ int http_forward_proxy_resp(struct stream *s, int final)
 void http_server_error(struct stream *s, struct stconn *sc, int err,
 		       int finst, struct http_reply *msg)
 {
+	/*
+	 * Modified by bholbrook@beyondtrust.com
+	 * We want internal errors to count against http_fail_cnt, mostly to catch errors of type
+	 * STRM_ET_QUEUE_TO and STRM_ET_CONN_TO, which usually occurs when Apache stops accepting new
+	 * connections, which occurs when all of its workers are busy. New requests linger here in
+	 * haproxy until they hit `timeout queue` or `timeout connect`, at which point srv/backend.c
+	 * calls `http_return_srv_error()` which calls us here.
+	 * We want these 503 responses to count against each client's fail_cnt, so if a single client
+	 * is responsible for using up all of the backend Apache workers, we can tarpit/deny them.
+	 * Seems like an obvious use case for http_fail_cnt, so I'm not sure why haproxy doesn't
+	 * increment in these situations
+	 */
+	if (s->txn->status >= 500 && s->txn->status != 501 && s->txn->status != 505)
+		stream_inc_http_fail_ctr(s);
 	http_reply_and_close(s, s->txn->status, msg);
 	if (!(s->flags & SF_ERR_MASK))
 		s->flags |= err;
