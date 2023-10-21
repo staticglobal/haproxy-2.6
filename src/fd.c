@@ -572,7 +572,7 @@ int fd_update_events(int fd, uint evts)
 		rmask = _HA_ATOMIC_LOAD(&fdtab[fd].running_mask);
 		tmask = _HA_ATOMIC_LOAD(&fdtab[fd].thread_mask);
 		rmask &= ~tid_bit;
-	} while (rmask & ~tmask);
+	} while ((rmask & ~tmask) && (tmask & tid_bit));
 
 	/* Now tmask is stable. Do nothing if the FD was taken over under us */
 
@@ -1013,6 +1013,7 @@ static void deinit_pollers_per_thread()
 /* Release the pollers per thread, to be called late */
 static void free_pollers_per_thread()
 {
+	fd_nbupdt = 0;
 	ha_free(&fd_updt);
 }
 

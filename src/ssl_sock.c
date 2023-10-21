@@ -1354,8 +1354,7 @@ static int tlskeys_finalize_config(void)
 	}
 
 	/* swap root */
-	LIST_INSERT(&tkr, &tlskeys_reference);
-	LIST_DELETE(&tkr);
+	LIST_SPLICE(&tlskeys_reference, &tkr);
 	return ERR_NONE;
 }
 #endif /* SSL_CTRL_SET_TLSEXT_TICKET_KEY_CB */
@@ -3641,6 +3640,9 @@ static int ssl_sock_load_cert_chain(const char *path, const struct cert_key_and_
 				    SSL_CTX *ctx, STACK_OF(X509) **find_chain, char **err)
 {
 	int errcode = 0;
+	int ret;
+
+	ERR_clear_error();
 
 	if (find_chain == NULL) {
 		errcode |= ERR_FATAL;
@@ -3648,8 +3650,9 @@ static int ssl_sock_load_cert_chain(const char *path, const struct cert_key_and_
 	}
 
 	if (!SSL_CTX_use_certificate(ctx, ckch->cert)) {
-		memprintf(err, "%sunable to load SSL certificate into SSL Context '%s'.\n",
-				err && *err ? *err : "", path);
+		ret = ERR_get_error();
+		memprintf(err, "%sunable to load SSL certificate into SSL Context '%s': %s.\n",
+				err && *err ? *err : "", path, ERR_reason_error_string(ret));
 		errcode |= ERR_ALERT | ERR_FATAL;
 		goto end;
 	}
@@ -3673,8 +3676,9 @@ static int ssl_sock_load_cert_chain(const char *path, const struct cert_key_and_
 	/* Load all certs in the ckch into the ctx_chain for the ssl_ctx */
 #ifdef SSL_CTX_set1_chain
 	if (!SSL_CTX_set1_chain(ctx, *find_chain)) {
-		memprintf(err, "%sunable to load chain certificate into SSL Context '%s'. Make sure you are linking against Openssl >= 1.0.2.\n",
-			  err && *err ? *err : "", path);
+		ret = ERR_get_error();
+		memprintf(err, "%sunable to load chain certificate into SSL Context '%s': %s. Make sure you are linking against Openssl >= 1.0.2.\n",
+			  err && *err ? *err : "", path,  ERR_reason_error_string(ret));
 		errcode |= ERR_ALERT | ERR_FATAL;
 		goto end;
 	}
@@ -4554,6 +4558,8 @@ static int ssl_sess_new_srv_cb(SSL *ssl, SSL_SESSION *sess)
 			ptr = s->ssl_ctx.reused_sess[tid].ptr;
 		} else {
 			ptr = realloc(s->ssl_ctx.reused_sess[tid].ptr, len);
+			if (!ptr)
+				free(s->ssl_ctx.reused_sess[tid].ptr);
 			s->ssl_ctx.reused_sess[tid].ptr = ptr;
 			s->ssl_ctx.reused_sess[tid].allocated_size = len;
 		}

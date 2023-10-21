@@ -31,6 +31,7 @@
 #include <haproxy/global.h>
 #include <haproxy/http_ana.h>
 #include <haproxy/http_htx.h>
+#include <haproxy/http_rules.h>
 #include <haproxy/listener.h>
 #include <haproxy/log.h>
 #include <haproxy/obj_type-t.h>
@@ -236,18 +237,7 @@ void free_proxy(struct proxy *p)
 
 	list_for_each_entry_safe(rdr, rdrb, &p->redirect_rules, list) {
 		LIST_DELETE(&rdr->list);
-		if (rdr->cond) {
-			prune_acl_cond(rdr->cond);
-			free(rdr->cond);
-		}
-		free(rdr->rdr_str);
-		list_for_each_entry_safe(lf, lfb, &rdr->rdr_fmt, list) {
-			LIST_DELETE(&lf->list);
-			release_sample_expr(lf->expr);
-			free(lf->arg);
-			free(lf);
-		}
-		free(rdr);
+		http_free_redirect_rule(rdr);
 	}
 
 	list_for_each_entry_safe(log, logb, &p->logsrvs, list) {
@@ -340,6 +330,7 @@ void free_proxy(struct proxy *p)
 			bind_conf->xprt->destroy_bind_conf(bind_conf);
 		free(bind_conf->file);
 		free(bind_conf->arg);
+		free(bind_conf->settings.interface);
 		LIST_DELETE(&bind_conf->by_fe);
 		free(bind_conf);
 	}
@@ -2019,11 +2010,40 @@ struct task *manage_proxy(struct task *t, void *context, unsigned int state)
 			 * to push to a new process and
 			 * we are free to flush the table.
 			 */
-			stktable_trash_oldest(p->table, p->table->current);
-			pool_gc(NULL);
+			int budget;
+			int cleaned_up;
+
+			/* We purposely enforce a budget limitation since we don't want
+			 * to spend too much time purging old entries
+			 *
+			 * This is known to cause the watchdog to occasionnaly trigger if
+			 * the table is huge and all entries become available for purge
+			 * at the same time
+			 *
+			 * Moreover, we must also anticipate the pool_gc() call which
+			 * will also be much slower if there is too much work at once
+			 */
+			budget = MIN(p->table->current, (1 << 15)); /* max: 32K */
+			cleaned_up = stktable_trash_oldest(p->table, budget);
+			if (cleaned_up) {
+				/* immediately release freed memory since we are stopping */
+				pool_gc(NULL);
+				if (cleaned_up > (budget / 2)) {
+					/* most of the budget was used to purge entries,
+					 * it is very likely that there are still trashable
+					 * entries in the table, reschedule a new cleanup
+					 * attempt ASAP
+					 */
+					t->expire = TICK_ETERNITY;
+					task_wakeup(t, TASK_WOKEN_RES);
+					return t;
+				}
+			}
 		}
 		if (p->table->current) {
-			/* some entries still remain, let's recheck in one second */
+			/* some entries still remain but are not yet available
+			 * for cleanup, let's recheck in one second
+			 */
 			next = tick_first(next, tick_add(now_ms, 1000));
 		}
 	}
@@ -2293,7 +2313,7 @@ int pause_proxy(struct proxy *p)
 		goto end;
 
 	list_for_each_entry(l, &p->conf.listeners, by_fe)
-		pause_listener(l, 1);
+		suspend_listener(l, 1, 0);
 
 	if (p->li_ready) {
 		ha_warning("%s %s failed to enter pause mode.\n", proxy_cap_str(p->cap), p->id);
@@ -2322,7 +2342,7 @@ void stop_proxy(struct proxy *p)
 	HA_RWLOCK_WRLOCK(PROXY_LOCK, &p->lock);
 
 	list_for_each_entry(l, &p->conf.listeners, by_fe)
-		stop_listener(l, 1, 0);
+		stop_listener(l, 1, 0, 0);
 
 	if (!(p->flags & (PR_FL_DISABLED|PR_FL_STOPPED)) && !p->li_ready) {
 		/* might be just a backend */
@@ -2351,7 +2371,7 @@ int resume_proxy(struct proxy *p)
 
 	fail = 0;
 	list_for_each_entry(l, &p->conf.listeners, by_fe) {
-		if (!resume_listener(l, 1)) {
+		if (!resume_listener(l, 1, 0)) {
 			int port;
 
 			port = get_host_port(&l->rx.addr);
@@ -3040,7 +3060,7 @@ static int cli_parse_set_maxconn_frontend(char **args, char *payload, struct app
 	px->maxconn = v;
 	list_for_each_entry(l, &px->conf.listeners, by_fe) {
 		if (l->state == LI_FULL)
-			resume_listener(l, 1);
+			relax_listener(l, 1, 0);
 	}
 
 	if (px->maxconn > px->feconn)

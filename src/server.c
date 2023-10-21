@@ -1393,6 +1393,20 @@ static int srv_parse_weight(char **args, int *cur_arg, struct proxy *px, struct 
 	return 0;
 }
 
+/* Returns 1 if the server has streams pointing to it, and 0 otherwise.
+ *
+ * Must be called with the server lock held.
+ */
+static int srv_has_streams(struct server *srv)
+{
+	int thr;
+
+	for (thr = 0; thr < global.nbthread; thr++)
+		if (!MT_LIST_ISEMPTY(&srv->per_thr[thr].streams))
+			return 1;
+	return 0;
+}
+
 /* Shutdown all connections of a server. The caller must pass a termination
  * code in <why>, which must be one of SF_ERR_* indicating the reason for the
  * shutdown.
@@ -2280,6 +2294,7 @@ void srv_settings_cpy(struct server *srv, const struct server *src, int srv_tmpl
 	if (srv_tmpl)
 		srv->srvrq = src->srvrq;
 
+	srv->netns                    = src->netns;
 	srv->check.via_socks4         = src->check.via_socks4;
 	srv->socks4_addr              = src->socks4_addr;
 }
@@ -2303,6 +2318,7 @@ struct server *new_server(struct proxy *proxy)
 	LIST_APPEND(&servers_list, &srv->global_list);
 	LIST_INIT(&srv->srv_rec_item);
 	LIST_INIT(&srv->ip_rec_item);
+	MT_LIST_INIT(&srv->prev_deleted);
 
 	srv->next_state = SRV_ST_RUNNING; /* early server setup */
 	srv->last_change = now.tv_sec;
@@ -2363,11 +2379,19 @@ struct server *srv_drop(struct server *srv)
 			goto end;
 	}
 
+	/* make sure we are removed from our 'next->prev_deleted' list
+	 * This doesn't require full thread isolation as we're using mt lists
+	 * However this could easily be turned into regular list if required
+	 * (with the proper use of thread isolation)
+	 */
+	MT_LIST_DELETE(&srv->prev_deleted);
+
 	task_destroy(srv->warmup);
 	task_destroy(srv->srvrq_check);
 
 	free(srv->id);
 	free(srv->cookie);
+	free(srv->rdr_pfx);
 	free(srv->hostname);
 	free(srv->hostname_dn);
 	free((char*)srv->conf.file);
@@ -4910,6 +4934,7 @@ static int cli_parse_delete_server(char **args, char *payload, struct appctx *ap
 	struct proxy *be;
 	struct server *srv;
 	char *be_name, *sv_name;
+	struct server *prev_del;
 
 	if (!cli_has_level(appctx, ACCESS_LVL_ADMIN))
 		return 1;
@@ -4968,7 +4993,7 @@ static int cli_parse_delete_server(char **args, char *payload, struct appctx *ap
 	 * cleanup function should be implemented to be used here.
 	 */
 	if (srv->cur_sess || srv->curr_idle_conns ||
-	    !eb_is_empty(&srv->queue.head)) {
+	    !eb_is_empty(&srv->queue.head) || srv_has_streams(srv)) {
 		cli_err(appctx, "Server still has connections attached to it, cannot remove it.");
 		goto out;
 	}
@@ -5005,6 +5030,25 @@ static int cli_parse_delete_server(char **args, char *payload, struct appctx *ap
 		next->next = srv->next;
 	}
 
+	/* Some deleted servers could still point to us using their 'next',
+	 * update them as needed
+	 * Please note the small race between the POP and APPEND, although in
+	 * this situation this is not an issue as we are under full thread
+	 * isolation
+	 */
+	while ((prev_del = MT_LIST_POP(&srv->prev_deleted, struct server *, prev_deleted))) {
+		/* update its 'next' ptr */
+		prev_del->next = srv->next;
+		if (srv->next) {
+			/* now it is our 'next' responsibility */
+			MT_LIST_APPEND(&srv->next->prev_deleted, &prev_del->prev_deleted);
+		}
+	}
+
+	/* we ourselves need to inform our 'next' that we will still point it */
+	if (srv->next)
+		MT_LIST_APPEND(&srv->next->prev_deleted, &srv->prev_deleted);
+
 	/* remove srv from addr_node tree */
 	eb32_delete(&srv->conf.id);
 	ebpt_delete(&srv->conf.name);
@@ -5013,6 +5057,15 @@ static int cli_parse_delete_server(char **args, char *payload, struct appctx *ap
 
 	/* remove srv from idle_node tree for idle conn cleanup */
 	eb32_delete(&srv->idle_node);
+
+	/* flag the server as deleted
+	 * (despite the server being removed from primary server list,
+	 * one could still access the server data from a valid ptr)
+	 * Deleted flag helps detecting when a server is in transient removal
+	 * state.
+	 * ie: removed from the list but not yet freed/purged from memory.
+	 */
+	srv->flags |= SRV_F_DELETED;
 
 	thread_release();
 
@@ -5155,6 +5208,7 @@ static void srv_update_status(struct server *s)
 	struct proxy *px = s->proxy;
 	int prev_srv_count = s->proxy->srv_bck + s->proxy->srv_act;
 	int srv_was_stopping = (s->cur_state == SRV_ST_STOPPING) || (s->cur_admin & SRV_ADMF_DRAIN);
+	enum srv_state srv_prev_state = s->cur_state;
 	int log_level;
 	struct buffer *tmptrash = NULL;
 
@@ -5169,7 +5223,6 @@ static void srv_update_status(struct server *s)
 		s->next_admin = s->cur_admin;
 
 		if ((s->cur_state != SRV_ST_STOPPED) && (s->next_state == SRV_ST_STOPPED)) {
-			s->last_change = now.tv_sec;
 			if (s->proxy->lbprm.set_server_status_down)
 				s->proxy->lbprm.set_server_status_down(s);
 
@@ -5200,13 +5253,9 @@ static void srv_update_status(struct server *s)
 				free_trash_chunk(tmptrash);
 				tmptrash = NULL;
 			}
-			if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
-				set_backend_down(s->proxy);
-
 			s->counters.down_trans++;
 		}
 		else if ((s->cur_state != SRV_ST_STOPPING) && (s->next_state == SRV_ST_STOPPING)) {
-			s->last_change = now.tv_sec;
 			if (s->proxy->lbprm.set_server_status_down)
 				s->proxy->lbprm.set_server_status_down(s);
 
@@ -5230,22 +5279,10 @@ static void srv_update_status(struct server *s)
 				free_trash_chunk(tmptrash);
 				tmptrash = NULL;
 			}
-
-			if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
-				set_backend_down(s->proxy);
 		}
 		else if (((s->cur_state != SRV_ST_RUNNING) && (s->next_state == SRV_ST_RUNNING))
 			 || ((s->cur_state != SRV_ST_STARTING) && (s->next_state == SRV_ST_STARTING))) {
-			if (s->proxy->srv_bck == 0 && s->proxy->srv_act == 0) {
-				if (s->proxy->last_change < now.tv_sec)		// ignore negative times
-					s->proxy->down_time += now.tv_sec - s->proxy->last_change;
-				s->proxy->last_change = now.tv_sec;
-			}
 
-			if (s->cur_state == SRV_ST_STOPPED && s->last_change < now.tv_sec)	// ignore negative times
-				s->down_time += now.tv_sec - s->last_change;
-
-			s->last_change = now.tv_sec;
 			if (s->next_state == SRV_ST_STARTING && s->warmup)
 				task_schedule(s->warmup, tick_add(now_ms, MS_TO_TICKS(MAX(1000, s->slowstart / 20))));
 
@@ -5291,9 +5328,6 @@ static void srv_update_status(struct server *s)
 				free_trash_chunk(tmptrash);
 				tmptrash = NULL;
 			}
-
-			if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
-				set_backend_down(s->proxy);
 		}
 		else if (s->cur_eweight != s->next_eweight) {
 			/* now propagate the status change to any LB algorithms */
@@ -5307,9 +5341,6 @@ static void srv_update_status(struct server *s)
 				if (px->lbprm.set_server_status_down)
 					px->lbprm.set_server_status_down(s);
 			}
-
-			if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
-				set_backend_down(s->proxy);
 		}
 
 		s->next_admin = next_admin;
@@ -5347,13 +5378,9 @@ static void srv_update_status(struct server *s)
 				free_trash_chunk(tmptrash);
 				tmptrash = NULL;
 			}
-			/* commit new admin status */
-
-			s->cur_admin = s->next_admin;
 		}
 		else {	/* server was still running */
 			check->health = 0; /* failure */
-			s->last_change = now.tv_sec;
 
 			s->next_state = SRV_ST_STOPPED;
 			if (s->proxy->lbprm.set_server_status_down)
@@ -5388,9 +5415,6 @@ static void srv_update_status(struct server *s)
 				free_trash_chunk(tmptrash);
 				tmptrash = NULL;
 			}
-			if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
-				set_backend_down(s->proxy);
-
 			s->counters.down_trans++;
 		}
 	}
@@ -5410,7 +5434,6 @@ static void srv_update_status(struct server *s)
 		 * that the server might still be in drain mode, which is naturally dealt
 		 * with by the lower level functions.
 		 */
-
 		if (s->check.state & CHK_ST_ENABLED) {
 			s->check.state &= ~CHK_ST_PAUSED;
 			check->health = check->rise; /* start OK but check immediately */
@@ -5423,7 +5446,6 @@ static void srv_update_status(struct server *s)
 				s->next_state = SRV_ST_STOPPING;
 			}
 			else {
-				s->last_change = now.tv_sec;
 				s->next_state = SRV_ST_STARTING;
 				if (s->slowstart > 0) {
 					if (s->warmup)
@@ -5480,11 +5502,6 @@ static void srv_update_status(struct server *s)
 			if (px->lbprm.set_server_status_down)
 				px->lbprm.set_server_status_down(s);
 		}
-
-		if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
-			set_backend_down(s->proxy);
-		else if (!prev_srv_count && (s->proxy->srv_bck || s->proxy->srv_act))
-			s->proxy->last_change = now.tv_sec;
 
 		/* If the server is set with "on-marked-up shutdown-backup-sessions",
 		 * and it's not a backup server and its effective weight is > 0,
@@ -5555,15 +5572,12 @@ static void srv_update_status(struct server *s)
 			}
 		}
 		/* don't report anything when leaving drain mode and remaining in maintenance */
-
-		s->cur_admin = s->next_admin;
 	}
 
 	if (!(s->next_admin & SRV_ADMF_MAINT)) {
 		if (!(s->cur_admin & SRV_ADMF_DRAIN) && (s->next_admin & SRV_ADMF_DRAIN)) {
 			/* drain state is applied only if not yet in maint */
 
-			s->last_change = now.tv_sec;
 			if (px->lbprm.set_server_status_down)
 				px->lbprm.set_server_status_down(s);
 
@@ -5591,26 +5605,14 @@ static void srv_update_status(struct server *s)
 				free_trash_chunk(tmptrash);
 				tmptrash = NULL;
 			}
-
-			if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
-				set_backend_down(s->proxy);
 		}
 		else if ((s->cur_admin & SRV_ADMF_DRAIN) && !(s->next_admin & SRV_ADMF_DRAIN)) {
 			/* OK completely leaving drain mode */
-			if (s->proxy->srv_bck == 0 && s->proxy->srv_act == 0) {
-				if (s->proxy->last_change < now.tv_sec)         // ignore negative times
-					s->proxy->down_time += now.tv_sec - s->proxy->last_change;
-				s->proxy->last_change = now.tv_sec;
-			}
-
-			if (s->last_change < now.tv_sec)                        // ignore negative times
-				s->down_time += now.tv_sec - s->last_change;
-			s->last_change = now.tv_sec;
 			server_recalc_eweight(s, 0);
 
 			tmptrash = alloc_trash_chunk();
 			if (tmptrash) {
-				if (!(s->next_admin & SRV_ADMF_FDRAIN)) {
+				if (s->cur_admin & SRV_ADMF_FDRAIN) {
 					chunk_printf(tmptrash,
 						     "%sServer %s/%s is %s (leaving forced drain)",
 						     s->flags & SRV_F_BACKUP ? "Backup " : "",
@@ -5674,15 +5676,38 @@ static void srv_update_status(struct server *s)
 				free_trash_chunk(tmptrash);
 				tmptrash = NULL;
 			}
-
-			/* commit new admin status */
-
-			s->cur_admin = s->next_admin;
 		}
 	}
 
 	/* Re-set log strings to empty */
 	*s->adm_st_chg_cause = 0;
+
+	/* explicitly commit state changes (even if it was already applied implicitly
+	 * by some lb state change function), so we don't miss anything
+	 */
+	srv_lb_commit_status(s);
+
+	/* check if server stats must be updated due the the server state change */
+	if (srv_prev_state != s->cur_state) {
+		if (srv_prev_state == SRV_ST_STOPPED) {
+			/* server was down and no longer is */
+			if (s->last_change < now.tv_sec)                        // ignore negative times
+				s->down_time += now.tv_sec - s->last_change;
+		}
+		s->last_change = now.tv_sec;
+	}
+
+	/* check if backend stats must be updated due to the server state change */
+	if (prev_srv_count && s->proxy->srv_bck == 0 && s->proxy->srv_act == 0)
+		set_backend_down(s->proxy); /* backend going down */
+	else if (!prev_srv_count && (s->proxy->srv_bck || s->proxy->srv_act)) {
+		/* backend was down and is back up again:
+		 * no helper function, updating last_change and backend downtime stats
+		 */
+		if (s->proxy->last_change < now.tv_sec)         // ignore negative times
+			s->proxy->down_time += now.tv_sec - s->proxy->last_change;
+		s->proxy->last_change = now.tv_sec;
+	}
 }
 
 struct task *srv_cleanup_toremove_conns(struct task *task, void *context, unsigned int state)

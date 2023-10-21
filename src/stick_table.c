@@ -693,7 +693,7 @@ struct stktable_type stktable_types[SMP_TYPES] = {
  * Returns 0 on successful parsing, else 1.
  * <myidx> is set at next configuration <args> index.
  */
-int stktable_parse_type(char **args, int *myidx, unsigned long *type, size_t *key_size)
+int stktable_parse_type(char **args, int *myidx, unsigned long *type, size_t *key_size, const char *file, int linenum)
 {
 	for (*type = 0; *type < SMP_TYPES; (*type)++) {
 		if (!stktable_types[*type].kw)
@@ -706,10 +706,14 @@ int stktable_parse_type(char **args, int *myidx, unsigned long *type, size_t *ke
 
 		if (stktable_types[*type].flags & STK_F_CUSTOM_KEYSIZE) {
 			if (strcmp("len", args[*myidx]) == 0) {
+				char *stop;
+
 				(*myidx)++;
-				*key_size = atol(args[*myidx]);
-				if (!*key_size)
-					break;
+				*key_size = strtol(args[*myidx], &stop, 10);
+				if (*stop != '\0' || !*key_size) {
+					ha_alert("parsing [%s:%d] : 'len' expects a positive integer argument.\n", file, linenum);
+					return 1;
+				}
 				if (*type == SMP_T_STR) {
 					/* null terminated string needs +1 for '\0'. */
 					(*key_size)++;
@@ -719,6 +723,7 @@ int stktable_parse_type(char **args, int *myidx, unsigned long *type, size_t *ke
 		}
 		return 0;
 	}
+	ha_alert("parsing [%s:%d] : %s: unknown type '%s'.\n", file, linenum, args[0], args[*myidx]);
 	return 1;
 }
 
@@ -879,9 +884,7 @@ int parse_stick_table(const char *file, int linenum, char **args,
 		}
 		else if (strcmp(args[idx], "type") == 0) {
 			idx++;
-			if (stktable_parse_type(args, &idx, &t->type, &t->key_size) != 0) {
-				ha_alert("parsing [%s:%d] : %s: unknown type '%s'.\n",
-					 file, linenum, args[0], args[idx]);
+			if (stktable_parse_type(args, &idx, &t->type, &t->key_size, file, linenum) != 0) {
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
@@ -2548,6 +2551,7 @@ static enum act_return action_set_gpt(struct act_rule *rule, struct proxy *px,
 			value = (unsigned int)(rule->arg.gpt.value);
 		else {
 			switch (rule->from) {
+			case ACT_F_TCP_REQ_CON: smp_opt_dir = SMP_OPT_DIR_REQ; break;
 			case ACT_F_TCP_REQ_SES: smp_opt_dir = SMP_OPT_DIR_REQ; break;
 			case ACT_F_TCP_REQ_CNT: smp_opt_dir = SMP_OPT_DIR_REQ; break;
 			case ACT_F_TCP_RES_CNT: smp_opt_dir = SMP_OPT_DIR_RES; break;
@@ -2614,6 +2618,7 @@ static enum act_return action_set_gpt0(struct act_rule *rule, struct proxy *px,
 			value = (unsigned int)(rule->arg.gpt.value);
 		else {
 			switch (rule->from) {
+			case ACT_F_TCP_REQ_CON: smp_opt_dir = SMP_OPT_DIR_REQ; break;
 			case ACT_F_TCP_REQ_SES: smp_opt_dir = SMP_OPT_DIR_REQ; break;
 			case ACT_F_TCP_REQ_CNT: smp_opt_dir = SMP_OPT_DIR_REQ; break;
 			case ACT_F_TCP_RES_CNT: smp_opt_dir = SMP_OPT_DIR_RES; break;
@@ -2736,6 +2741,7 @@ static enum act_parse_ret parse_set_gpt(const char **args, int *arg, struct prox
 			return ACT_RET_PRS_ERR;
 
 		switch (rule->from) {
+		case ACT_F_TCP_REQ_CON: smp_val = SMP_VAL_FE_CON_ACC; break;
 		case ACT_F_TCP_REQ_SES: smp_val = SMP_VAL_FE_SES_ACC; break;
 		case ACT_F_TCP_REQ_CNT: smp_val = SMP_VAL_FE_REQ_CNT; break;
 		case ACT_F_TCP_RES_CNT: smp_val = SMP_VAL_BE_RES_CNT; break;
@@ -5002,6 +5008,17 @@ static struct action_kw_list http_res_kws = { { }, {
 }};
 
 INITCALL1(STG_REGISTER, http_res_keywords_register, &http_res_kws);
+
+static struct action_kw_list http_after_res_kws = { { }, {
+	{ "sc-inc-gpc",  parse_inc_gpc,  KWF_MATCH_PREFIX },
+	{ "sc-inc-gpc0", parse_inc_gpc,  KWF_MATCH_PREFIX },
+	{ "sc-inc-gpc1", parse_inc_gpc,  KWF_MATCH_PREFIX },
+	{ "sc-set-gpt",  parse_set_gpt,  KWF_MATCH_PREFIX },
+	{ "sc-set-gpt0", parse_set_gpt,  KWF_MATCH_PREFIX },
+	{ /* END */ }
+}};
+
+INITCALL1(STG_REGISTER, http_after_res_keywords_register, &http_after_res_kws);
 
 /* Note: must not be declared <const> as its list will be overwritten.
  * Please take care of keeping this list alphabetically sorted.

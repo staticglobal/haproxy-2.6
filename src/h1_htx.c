@@ -259,7 +259,7 @@ static int h1_postparse_res_hdrs(struct h1m *h1m, union h1_sl *h1sl, struct htx 
 			else if (isteqi(hdrs[hdr].n, ist("location"))) {
 				code = 302;
 				status = ist("302");
-				reason = ist("Moved Temporarily");
+				reason = ist("Found");
 			}
 		}
 		if (!code) {
@@ -833,7 +833,7 @@ size_t h1_parse_msg_data(struct h1m *h1m, struct htx **dsthtx,
 {
 	size_t sz, total = 0;
 
-	if (b_data(srcbuf) == ofs || max <= sizeof(struct htx_blk))
+	if (b_data(srcbuf) == ofs)
 		return 0;
 
 	if (h1m->flags & H1_MF_CLEN) {

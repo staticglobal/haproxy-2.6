@@ -668,30 +668,35 @@ read:
 			struct dns_query *query;
 
 			if (!ds->rx_msg.len) {
-				/* next message len is not fully available into the channel */
-				if (co_data(sc_oc(sc)) < 2)
-					break;
-
 				/* retrieve message len */
-				co_getblk(sc_oc(sc), (char *)&msg_len, 2, 0);
+				ret = co_getblk(sc_oc(sc), (char *)&msg_len, 2, 0);
+				if (ret <= 0) {
+					if (ret == -1)
+						goto close;
+					applet_need_more_data(appctx);
+					break;
+				}
 
 				/* mark as consumed */
 				co_skip(sc_oc(sc), 2);
 
 				/* store message len */
 				ds->rx_msg.len = ntohs(msg_len);
-			}
-
-			if (!co_data(sc_oc(sc))) {
-				/* we need more data but nothing is available */
-				break;
+				if (!ds->rx_msg.len)
+					continue;
 			}
 
 			if (co_data(sc_oc(sc)) + ds->rx_msg.offset < ds->rx_msg.len) {
 				/* message only partially available */
 
 				/* read available data */
-				co_getblk(sc_oc(sc), ds->rx_msg.area + ds->rx_msg.offset, co_data(sc_oc(sc)), 0);
+				ret = co_getblk(sc_oc(sc), ds->rx_msg.area + ds->rx_msg.offset, co_data(sc_oc(sc)), 0);
+				if (ret <= 0) {
+					if (ret == -1)
+						goto close;
+					applet_need_more_data(appctx);
+					break;
+				}
 
 				/* update message offset */
 				ds->rx_msg.offset += co_data(sc_oc(sc));
@@ -700,13 +705,20 @@ read:
 				co_skip(sc_oc(sc), co_data(sc_oc(sc)));
 
 				/* we need to wait for more data */
+				applet_need_more_data(appctx);
 				break;
 			}
 
 			/* enough data is available into the channel to read the message until the end */
 
 			/* read from the channel until the end of the message */
-			co_getblk(sc_oc(sc), ds->rx_msg.area + ds->rx_msg.offset, ds->rx_msg.len - ds->rx_msg.offset, 0);
+			ret = co_getblk(sc_oc(sc), ds->rx_msg.area + ds->rx_msg.offset, ds->rx_msg.len - ds->rx_msg.offset, 0);
+			if (ret <= 0) {
+				if (ret == -1)
+					goto close;
+				applet_need_more_data(appctx);
+				break;
+			}
 
 			/* consume all data until the end of the message from the channel */
 			co_skip(sc_oc(sc), ds->rx_msg.len - ds->rx_msg.offset);
@@ -1016,7 +1028,7 @@ static struct task *dns_process_idle_exp(struct task *t, void *context, unsigned
 
 	target = (dss->max_active_conns - cur_active_conns) / 2;
 	list_for_each_entry_safe(ds, dsb, &dss->idle_sess, list) {
-		if (!target)
+		if (!stopping && !target)
 			break;
 
 		/* remove conn to pending list to ensure it won't be reused */

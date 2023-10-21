@@ -49,21 +49,9 @@ static inline void quic_tp_version_info_dump(struct buffer *b,
 	if (!tp->choosen)
 		return;
 
-	chunk_appendf(b, "\n\tversion_information:(choosen=0x%08x", tp->choosen);
-	if (tp->nb_others) {
-		int i = 0;
-		const uint32_t *ver;
-		chunk_appendf(b, ",others=");
-		for (ver = tp->others; i < tp->nb_others; i++, ver++) {
-			if (i != 0)
-				chunk_appendf(b, ",");
-			if (local)
-				chunk_appendf(b, "0x%08x", *ver);
-			else
-				chunk_appendf(b, "0x%08x", ntohl(*ver));
-		}
-		chunk_appendf(b, ")\n");
-	}
+	chunk_appendf(b, "    versions:chosen=0x%08x", tp->choosen);
+	if (tp->negotiated_version)
+		chunk_appendf(b, ",negotiated=0x%08x", tp->negotiated_version->num);
 }
 
 static inline void quic_transport_params_dump(struct buffer *b,

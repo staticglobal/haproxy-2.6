@@ -1891,17 +1891,16 @@ static void dump_registered_keywords(void)
 static void generate_random_cluster_secret()
 {
 	/* used as a default random cluster-secret if none defined. */
-	uint64_t rand = ha_random64();
+	uint64_t rand;
 
 	/* The caller must not overwrite an already defined secret. */
-	BUG_ON(global.cluster_secret);
+	BUG_ON(cluster_secret_isset);
 
-	global.cluster_secret = malloc(8);
-	if (!global.cluster_secret)
-		return;
-
+	rand = ha_random64();
 	memcpy(global.cluster_secret, &rand, sizeof(rand));
-	global.cluster_secret[7] = '\0';
+	rand = ha_random64();
+	memcpy(global.cluster_secret + sizeof(rand), &rand, sizeof(rand));
+	cluster_secret_isset = 1;
 }
 
 /*
@@ -2164,7 +2163,19 @@ static void init(int argc, char **argv)
 		exit(1);
 	}
 
+	/* update the ready date that will be used to count the startup time
+	 * during config checks (e.g. to schedule certain tasks if needed)
+	 */
+	gettimeofday(&date, NULL);
+	ready_date = date;
+
+	/* Note: global.nbthread will be initialized as part of this call */
 	err_code |= check_config_validity();
+
+	/* update the ready date to also account for the check time */
+	gettimeofday(&date, NULL);
+	ready_date = date;
+
 	for (px = proxies_list; px; px = px->next) {
 		struct server *srv;
 		struct post_proxy_check_fct *ppcf;
@@ -2546,7 +2557,7 @@ static void init(int argc, char **argv)
 		exit(1);
 	}
 
-	if (!global.cluster_secret)
+	if (!cluster_secret_isset)
 		generate_random_cluster_secret();
 
 	/*
@@ -2681,6 +2692,17 @@ void deinit(void)
 		free_proxy(p0);
 	}/* end while(p) */
 
+	/* we don't need to free sink_proxies_list proxies since it is
+	 * already handled in sink_deinit()
+	 */
+	p = cfg_log_forward;
+	/* we need to manually clean cfg_log_forward proxy list */
+	while (p) {
+		p0 = p;
+		p = p->next;
+		free_proxy(p0);
+	}
+
 	/* destroy all referenced defaults proxies  */
 	proxy_destroy_all_unref_defaults();
 
@@ -2722,7 +2744,6 @@ void deinit(void)
 	ha_free(&global.log_send_hostname);
 	chunk_destroy(&global.log_tag);
 	ha_free(&global.chroot);
-	ha_free(&global.cluster_secret);
 	ha_free(&global.pidfile);
 	ha_free(&global.node);
 	ha_free(&global.desc);
@@ -3372,6 +3393,10 @@ int main(int argc, char **argv)
 				 global.maxsock);
 	}
 
+	/* update the ready date a last time to also account for final setup time */
+	gettimeofday(&date, NULL);
+	ready_date = date;
+
 	if (global.mode & (MODE_DAEMON | MODE_MWORKER | MODE_MWORKER_WAIT)) {
 		int ret = 0;
 		int in_parent = 0;
@@ -3441,6 +3466,9 @@ int main(int argc, char **argv)
 							child->timestamp = date.tv_sec;
 							child->pid = ret;
 							child->version = strdup(haproxy_version);
+							/* at this step the fd is bound for the worker, set it to -1 so
+							 * it could be close in case of errors in mworker_cleanup_proc() */
+							child->ipc_fd[1] = -1;
 							break;
 						}
 					}

@@ -32,6 +32,7 @@
 #   USE_CRYPT_H          : set it if your system requires including crypt.h
 #   USE_GETADDRINFO      : use getaddrinfo() to resolve IPv6 host names.
 #   USE_OPENSSL          : enable use of OpenSSL. Recommended, but see below.
+#   USE_QUIC             : enable use of QUIC with the quictls API (quictls, libressl, boringssl)
 #   USE_ENGINE           : enable use of OpenSSL Engine.
 #   USE_LUA              : enable Lua support.
 #   USE_ACCEPT4          : enable use of accept4() on linux. Automatic.
@@ -714,7 +715,7 @@ OPTIONS_OBJS	+= $(DEVICEATLAS_LIB)/json.o
 OPTIONS_OBJS	+= $(DEVICEATLAS_LIB)/dac.o
 endif
 OPTIONS_OBJS	+= addons/deviceatlas/da.o
-OPTIONS_CFLAGS += $(if $(DEVICEATLAS_INC),-I$(DEVICEATLAS_INC))
+OPTIONS_CFLAGS += $(if $(DEVICEATLAS_INC),-I$(DEVICEATLAS_INC)) $(if $(DEVICEATLAS_SRC),-DDATLAS_DA_NOCACHE)
 endif
 
 ifneq ($(USE_51DEGREES),)

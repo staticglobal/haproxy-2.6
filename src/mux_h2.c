@@ -134,7 +134,7 @@ struct h2c {
 
 	int timeout;        /* idle timeout duration in ticks */
 	int shut_timeout;   /* idle timeout duration in ticks after GOAWAY was sent */
-	int idle_start;     /* date of the last time the connection went idle */
+	int idle_start;     /* date of the last time the connection went idle (no stream + empty mbuf), or the start of current http req */
 	/* 32-bit hole here */
 	unsigned int nb_streams;  /* number of streams in the tree */
 	unsigned int nb_sc;       /* number of attached stream connectors */
@@ -730,34 +730,41 @@ static void h2c_update_timeout(struct h2c *h2c)
 
 	if (h2c_may_expire(h2c)) {
 		/* no more streams attached */
-		if (h2c->last_sid >= 0) {
-			/* GOAWAY sent, closing in progress */
-			h2c->task->expire = tick_add_ifset(now_ms, h2c->shut_timeout);
-			is_idle_conn = 1;
-		} else if (br_data(h2c->mbuf)) {
+		if (br_data(h2c->mbuf)) {
 			/* pending output data: always the regular data timeout */
 			h2c->task->expire = tick_add_ifset(now_ms, h2c->timeout);
-		} else if (!(h2c->flags & H2_CF_IS_BACK) && h2c->max_id > 0 && !b_data(&h2c->dbuf)) {
-			/* idle after having seen one stream => keep-alive */
-			int to;
-
-			if (tick_isset(h2c->proxy->timeout.httpka))
-				to = h2c->proxy->timeout.httpka;
-			else
-				to = h2c->proxy->timeout.httpreq;
-
-			h2c->task->expire = tick_add_ifset(h2c->idle_start, to);
-			is_idle_conn = 1;
 		} else {
-			/* before first request, or started to deserialize a
-			 * new req => http-request, but only set, not refresh.
-			 */
-			int exp = (h2c->flags & H2_CF_IS_BACK) ? TICK_ETERNITY : h2c->proxy->timeout.httpreq;
-			h2c->task->expire = tick_add_ifset(h2c->idle_start, exp);
+			/* no stream, no output data */
+			if (!(h2c->flags & H2_CF_IS_BACK)) {
+				int to;
+
+				if (h2c->max_id > 0 && !b_data(&h2c->dbuf) &&
+				    tick_isset(h2c->proxy->timeout.httpka)) {
+					/* idle after having seen one stream => keep-alive */
+					to = h2c->proxy->timeout.httpka;
+				} else {
+					/* before first request, or started to deserialize a
+					 * new req => http-request.
+					 */
+					to = h2c->proxy->timeout.httpreq;
+				}
+
+				h2c->task->expire = tick_add_ifset(h2c->idle_start, to);
+				is_idle_conn = 1;
+			}
+
+			if (h2c->flags & (H2_CF_GOAWAY_SENT|H2_CF_GOAWAY_FAILED)) {
+				/* GOAWAY sent (or failed), closing in progress */
+				int exp = tick_add_ifset(now_ms, h2c->shut_timeout);
+
+				h2c->task->expire = tick_first(h2c->task->expire, exp);
+				is_idle_conn = 1;
+			}
+
+			/* if a timeout above was not set, fall back to the default one */
+			if (!tick_isset(h2c->task->expire))
+				h2c->task->expire = tick_add_ifset(now_ms, h2c->timeout);
 		}
-		/* if a timeout above was not set, fall back to the default one */
-		if (!tick_isset(h2c->task->expire))
-			h2c->task->expire = tick_add_ifset(now_ms, h2c->timeout);
 
 		if ((h2c->proxy->flags & (PR_FL_DISABLED|PR_FL_STOPPED)) &&
 		    is_idle_conn && tick_isset(global.close_spread_end)) {
@@ -3148,6 +3155,13 @@ static int h2c_handle_data(struct h2c *h2c, struct h2s *h2s)
 		goto strm_err;
 	}
 
+	if (!(h2s->flags & H2_SF_HEADERS_RCVD)) {
+		/* RFC9113#8.1: The header section must be received before the message content */
+		TRACE_ERROR("Unexpected DATA frame before the message headers", H2_EV_RX_FRAME|H2_EV_RX_DATA, h2c->conn, h2s);
+		error = H2_ERR_PROTOCOL_ERROR;
+		HA_ATOMIC_INC(&h2c->px_counters->strm_proto_err);
+		goto strm_err;
+	}
 	if ((h2s->flags & H2_SF_DATA_CLEN) && (h2c->dfl - h2c->dpl) > h2s->body_len) {
 		/* RFC7540#8.1.2 */
 		TRACE_ERROR("DATA frame larger than content-length", H2_EV_RX_FRAME|H2_EV_RX_DATA, h2c->conn, h2s);
@@ -3568,7 +3582,8 @@ static void h2_process_demux(struct h2c *h2c)
 			}
 
 			/* transition to HEADERS frame ends the keep-alive idle
-			 * timer and starts the http-request idle delay.
+			 * timer and starts the http-request idle delay. It uses
+			 * the idle_start timer as well.
 			 */
 			if (hdr.ft == H2_FT_HEADERS)
 				h2c->idle_start = now_ms;
@@ -3978,6 +3993,7 @@ static int h2_send(struct h2c *h2c)
 
 	if (conn->flags & CO_FL_ERROR) {
 		TRACE_DEVEL("leaving on error", H2_EV_H2C_SEND, h2c->conn);
+		h2c->idle_start = now_ms;
 		return 1;
 	}
 
@@ -4084,6 +4100,8 @@ static int h2_send(struct h2c *h2c)
 	/* We're done, no more to send */
 	if (!br_data(h2c->mbuf)) {
 		TRACE_DEVEL("leaving with everything sent", H2_EV_H2C_SEND, h2c->conn);
+		if (!h2c->nb_sc)
+			h2c->idle_start = now_ms;
 		return sent;
 	}
 schedule:
@@ -4520,7 +4538,7 @@ static void h2_detach(struct sedesc *sd)
 	sess = h2s->sess;
 	h2c = h2s->h2c;
 	h2c->nb_sc--;
-	if (!h2c->nb_sc)
+	if (!h2c->nb_sc && !br_data(h2c->mbuf))
 		h2c->idle_start = now_ms;
 
 	if ((h2c->flags & (H2_CF_IS_BACK|H2_CF_DEM_TOOMANY)) == H2_CF_DEM_TOOMANY &&
@@ -5079,7 +5097,8 @@ next_frame:
 	if (h2c->flags & H2_CF_IS_BACK)
 		outlen = h2_make_htx_response(list, htx, &msgf, body_len, upgrade_protocol);
 	else
-		outlen = h2_make_htx_request(list, htx, &msgf, body_len);
+		outlen = h2_make_htx_request(list, htx, &msgf, body_len,
+					     !!(((const struct session *)h2c->conn->owner)->fe->options2 & PR_O2_REQBUG_OK));
 
 	if (outlen < 0 || htx_free_space(htx) < global.tune.maxrewrite) {
 		/* too large headers? this is a stream error only */
@@ -5264,18 +5283,9 @@ try_again:
 		 * EOM was already reported.
 		 */
 		if ((h2c->flags & H2_CF_IS_BACK) || !(h2s->flags & H2_SF_TUNNEL_ABRT)) {
-			/* If we receive an empty DATA frame with ES flag while the HTX
-			 * message is empty, we must be sure to push a block to be sure
-			 * the HTX EOM flag will be handled on the other side. It is a
-			 * workaround because for now it is not possible to push empty
-			 * HTX DATA block. And without this block, there is no way to
-			 * "commit" the end of the message.
-			 */
-			if (htx_is_empty(htx)) {
-				if (!htx_add_endof(htx, HTX_BLK_EOT))
-					goto fail;
-			}
-			htx->flags |= HTX_FL_EOM;
+			/* htx may be empty if receiving an empty DATA frame. */
+			if (!htx_set_eom(htx))
+				goto fail;
 		}
 	}
 

@@ -899,9 +899,8 @@ int http_process_tarpit(struct stream *s, struct channel *req, int an_bit)
  * reached the buffer. It must only be called after the standard HTTP request
  * processing has occurred, because it expects the request to be parsed and will
  * look for the Expect header. It may send a 100-Continue interim response. It
- * takes in input any state starting from HTTP_MSG_BODY and leaves with one of
- * HTTP_MSG_CHK_SIZE, HTTP_MSG_DATA or HTTP_MSG_TRAILERS. It returns zero if it
- * needs to read more data, or 1 once it has completed its analysis.
+ * returns zero if it needs to read more data, or 1 once it has completed its
+ * analysis.
  */
 int http_wait_for_request_body(struct stream *s, struct channel *req, int an_bit)
 {
@@ -2697,10 +2696,11 @@ int http_replace_hdrs(struct stream* s, struct htx *htx, struct ist name,
 		     const char *str, struct my_regex *re, int full)
 {
 	struct http_hdr_ctx ctx;
-	struct buffer *output = get_trash_chunk();
 
 	ctx.blk = NULL;
 	while (http_find_header(htx, name, &ctx, full)) {
+		struct buffer *output = get_trash_chunk();
+
 		if (!regex_exec_match2(re, ctx.value.ptr, ctx.value.len, MAX_MATCH, pmatch, 0))
 			continue;
 
@@ -3899,6 +3899,7 @@ void http_check_response_for_cacheability(struct stream *s, struct channel *res)
 	struct htx *htx;
 	int has_freshness_info = 0;
 	int has_validator = 0;
+	int has_null_maxage = 0;
 
 	if (txn->status < 200) {
 		/* do not try to cache interim responses! */
@@ -3923,10 +3924,16 @@ void http_check_response_for_cacheability(struct stream *s, struct channel *res)
 			txn->flags |= TX_CACHEABLE | TX_CACHE_COOK;
 			continue;
 		}
+		/* This max-age might be overridden by a s-maxage directive, do
+		 * not unset the TX_CACHEABLE yet. */
+		if (isteqi(ctx.value, ist("max-age=0"))) {
+			has_null_maxage = 1;
+			continue;
+		}
+
 		if (isteqi(ctx.value, ist("private")) ||
 		    isteqi(ctx.value, ist("no-cache")) ||
 		    isteqi(ctx.value, ist("no-store")) ||
-		    isteqi(ctx.value, ist("max-age=0")) ||
 		    isteqi(ctx.value, ist("s-maxage=0"))) {
 			txn->flags &= ~TX_CACHEABLE & ~TX_CACHE_COOK;
 			continue;
@@ -3937,11 +3944,21 @@ void http_check_response_for_cacheability(struct stream *s, struct channel *res)
 			continue;
 		}
 
-		if (istmatchi(ctx.value, ist("s-maxage")) ||
-		    istmatchi(ctx.value, ist("max-age"))) {
+		if (istmatchi(ctx.value, ist("s-maxage"))) {
+			has_freshness_info = 1;
+			has_null_maxage = 0;	/* The null max-age is overridden, ignore it */
+			continue;
+		}
+		if (istmatchi(ctx.value, ist("max-age"))) {
 			has_freshness_info = 1;
 			continue;
 		}
+	}
+
+	/* We had a 'max-age=0' directive but no extra s-maxage, do not cache
+	 * the response. */
+	if (has_null_maxage) {
+		txn->flags &= ~TX_CACHEABLE & ~TX_CACHE_COOK;
 	}
 
 	/* If no freshness information could be found in Cache-Control values,
@@ -4231,17 +4248,15 @@ enum rule_result http_wait_for_msg_body(struct stream *s, struct channel *chn,
 	if (txn->meth == HTTP_METH_CONNECT || (msg->flags & HTTP_MSGF_BODYLESS))
 		goto end;
 
-	if (!(chn->flags & CF_ISRESP) && msg->msg_state < HTTP_MSG_DATA) {
+	if (!(chn->flags & CF_ISRESP)) {
 		if (http_handle_expect_hdr(s, htx, msg) == -1) {
 			ret = HTTP_RULE_RES_ERROR;
 			goto end;
 		}
 	}
 
-	msg->msg_state = HTTP_MSG_DATA;
-
-	/* Now we're in HTTP_MSG_DATA. We just need to know if all data have
-	 * been received or if the buffer is full.
+	/* Now we're are waiting for the payload. We just need to know if all
+	 * data have been received or if the buffer is full.
 	 */
 	if ((htx->flags & HTX_FL_EOM) ||
 	    htx_get_tail_type(htx) > HTX_BLK_DATA ||
@@ -4977,7 +4992,8 @@ static int http_handle_expect_hdr(struct stream *s, struct htx *htx, struct http
 	/* If we have HTTP/1.1 message with a body and Expect: 100-continue,
 	 * then we must send an HTTP/1.1 100 Continue intermediate response.
 	 */
-	if (msg->msg_state == HTTP_MSG_BODY && (msg->flags & HTTP_MSGF_VER_11) &&
+	if (!(msg->flags & HTTP_MSGF_EXPECT_CHECKED) &&
+	    (msg->flags & HTTP_MSGF_VER_11) &&
 	    (msg->flags & (HTTP_MSGF_CNT_LEN|HTTP_MSGF_TE_CHNK))) {
 		struct ist hdr = { .ptr = "Expect", .len = 6 };
 		struct http_hdr_ctx ctx;
@@ -4991,6 +5007,7 @@ static int http_handle_expect_hdr(struct stream *s, struct htx *htx, struct http
 			http_remove_header(htx, &ctx);
 		}
 	}
+	msg->flags |= HTTP_MSGF_EXPECT_CHECKED;
 	return 0;
 }
 

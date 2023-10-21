@@ -2451,8 +2451,18 @@ static struct task *process_resolvers(struct task *t, void *context, unsigned in
 			LIST_APPEND(&resolvers->resolutions.wait, &res->list);
 		}
 	}
+
 	resolv_update_resolvers_timeout(resolvers);
 	HA_SPIN_UNLOCK(DNS_LOCK, &resolvers->lock);
+
+	if (unlikely(stopping)) {
+		struct dns_nameserver *ns;
+
+		list_for_each_entry(ns, &resolvers->nameservers, list) {
+			if (ns->stream)
+				task_wakeup(ns->stream->task_idle, TASK_WOKEN_MSG);
+		}
+	}
 
 	/* now we can purge all queued deletions */
 	leave_resolver_code();
@@ -2688,7 +2698,7 @@ static int stats_dump_resolv_to_buffer(struct stconn *sc,
 	return 1;
 
   full:
-	sc_have_room(sc);
+	sc_need_room(sc);
 	return 0;
 }
 
@@ -3235,7 +3245,7 @@ void resolvers_setup_proxy(struct proxy *px)
 	px->conn_retries = 1;
 	px->timeout.server = TICK_ETERNITY;
 	px->timeout.client = TICK_ETERNITY;
-	px->timeout.connect = TICK_ETERNITY;
+	px->timeout.connect = 1000; // by default same than timeout.resolve
 	px->accept = NULL;
 	px->options2 |= PR_O2_INDEPSTR | PR_O2_SMARTCON;
 }
@@ -3704,8 +3714,11 @@ int cfg_parse_resolvers(const char *file, int linenum, char **args, int kwm)
 			}
 			if (args[1][2] == 't')
 				curr_resolvers->timeout.retry = tout;
-			else
+			else {
 				curr_resolvers->timeout.resolve = tout;
+				curr_resolvers->px->timeout.connect = tout;
+			}
+
 		}
 		else {
 			ha_alert("parsing [%s:%d] : '%s' expects 'retry' or 'resolve' and <time> as arguments got '%s'.\n",

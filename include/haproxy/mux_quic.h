@@ -10,9 +10,10 @@
 #include <haproxy/connection.h>
 #include <haproxy/list.h>
 #include <haproxy/mux_quic-t.h>
-#include <haproxy/stream.h>
+#include <haproxy/stconn.h>
 
 struct qcs *qcc_init_stream_local(struct qcc *qcc, int bidi);
+struct stconn *qc_attach_sc(struct qcs *qcs, struct buffer *buf, char fin);
 struct buffer *qc_get_buf(struct qcs *qcs, struct buffer *bptr);
 
 int qcs_subscribe(struct qcs *qcs, int event_type, struct wait_event *es);
@@ -82,48 +83,6 @@ static inline char *qcs_st_to_str(enum qcs_state st)
 }
 
 int qcc_install_app_ops(struct qcc *qcc, const struct qcc_app_ops *app_ops);
-
-static inline struct stconn *qc_attach_sc(struct qcs *qcs, struct buffer *buf)
-{
-	struct qcc *qcc = qcs->qcc;
-	struct session *sess = qcc->conn->owner;
-
-	qcs->sd = sedesc_new();
-	if (!qcs->sd)
-		return NULL;
-
-	qcs->sd->se   = qcs;
-	qcs->sd->conn = qcc->conn;
-	se_fl_set(qcs->sd, SE_FL_T_MUX | SE_FL_ORPHAN | SE_FL_NOT_FIRST);
-
-	/* TODO duplicated from mux_h2 */
-	sess->t_idle = tv_ms_elapsed(&sess->tv_accept, &now) - sess->t_handshake;
-
-	if (!sc_new_from_endp(qcs->sd, sess, buf))
-		return NULL;
-
-	/* QC_SF_HREQ_RECV must be set once for a stream. Else, nb_hreq counter
-	 * will be incorrect for the connection.
-	 */
-	BUG_ON_HOT(qcs->flags & QC_SF_HREQ_RECV);
-	qcs->flags |= QC_SF_HREQ_RECV;
-	++qcc->nb_sc;
-	++qcc->nb_hreq;
-
-	/* TODO duplicated from mux_h2 */
-	sess->accept_date = date;
-	sess->tv_accept   = now;
-	sess->t_handshake = 0;
-	sess->t_idle = 0;
-
-	/* A stream must have been registered for HTTP wait before attaching
-	 * it to sedesc. See <qcs_wait_http_req> for more info.
-	 */
-	BUG_ON_HOT(!LIST_INLIST(&qcs->el_opening));
-	LIST_DEL_INIT(&qcs->el_opening);
-
-	return qcs->sd->sc;
-}
 
 /* Register <qcs> stream for http-request timeout. If the stream is not yet
  * attached in the configured delay, qcc timeout task will be triggered. This

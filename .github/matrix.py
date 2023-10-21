@@ -37,7 +37,9 @@ def determine_latest_openssl(ssl):
     return "OPENSSL_VERSION={}".format(latest_tag[8:])
 
 def determine_latest_libressl(ssl):
-    libressl_download_list = urllib.request.urlopen("http://ftp.openbsd.org/pub/OpenBSD/LibreSSL/")
+    libressl_download_list = urllib.request.urlopen(
+        "https://cdn.openbsd.org/pub/OpenBSD/LibreSSL/"
+    )
     for line in libressl_download_list.readlines():
         decoded_line = line.decode("utf-8")
         if "libressl-" in decoded_line and ".tar.gz.asc" in decoded_line:

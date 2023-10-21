@@ -25,9 +25,8 @@ void quic_loss_srtt_update(struct quic_loss *ql,
 	ql->latest_rtt = rtt;
 	if (!ql->rtt_min) {
 		/* No previous measurement. */
-		ql->srtt = rtt << 3;
-		/* rttval <- rtt / 2 or 4*rttval <- 2*rtt. */
-		ql->rtt_var = rtt << 1;
+		ql->srtt = rtt;
+		ql->rtt_var = rtt / 2;
 		ql->rtt_min = rtt;
 	}
 	else {
@@ -35,15 +34,13 @@ void quic_loss_srtt_update(struct quic_loss *ql,
 
 		ql->rtt_min = QUIC_MIN(rtt, ql->rtt_min);
 		/* Specific to QUIC (RTT adjustment). */
-		if (ack_delay && rtt > ql->rtt_min + ack_delay)
+		if (ack_delay && rtt >= ql->rtt_min + ack_delay)
 			rtt -= ack_delay;
 		diff = ql->srtt - rtt;
 		if (diff < 0)
 			diff = -diff;
-		/* 4*rttvar = 3*rttvar + |diff| */
-		ql->rtt_var += diff - (ql->rtt_var >> 2);
-		/* 8*srtt = 7*srtt + rtt */
-		ql->srtt += rtt - (ql->srtt >> 3);
+		ql->rtt_var = (3 * ql->rtt_var + diff) / 4;
+		ql->srtt = (7 * ql->srtt + rtt) / 8;
 	}
 
 	TRACE_DEVEL("Loss info update", QUIC_EV_CONN_RTTUPDT, qc,,, ql);
@@ -66,7 +63,7 @@ struct quic_pktns *quic_loss_pktns(struct quic_conn *qc)
 	for (i = QUIC_TLS_PKTNS_HANDSHAKE; i < QUIC_TLS_PKTNS_MAX; i++) {
 		TRACE_DEVEL("pktns", QUIC_EV_CONN_SPTO, qc, &qc->pktns[i]);
 		if (!tick_isset(pktns->tx.loss_time) ||
-		    qc->pktns[i].tx.loss_time < pktns->tx.loss_time)
+		    tick_is_lt(qc->pktns[i].tx.loss_time, pktns->tx.loss_time))
 			pktns = &qc->pktns[i];
 	}
 
@@ -90,22 +87,21 @@ struct quic_pktns *quic_pto_pktns(struct quic_conn *qc,
 
 	TRACE_ENTER(QUIC_EV_CONN_SPTO, qc);
 	duration =
-		(ql->srtt >> 3) +
-		(QUIC_MAX(ql->rtt_var, QUIC_TIMER_GRANULARITY) << ql->pto_count);
+		ql->srtt +
+		(QUIC_MAX(4 * ql->rtt_var, QUIC_TIMER_GRANULARITY) << ql->pto_count);
 
-	if (!qc->path->in_flight) {
-		struct quic_enc_level *hel;
-
-		hel = &qc->els[QUIC_TLS_ENC_LEVEL_HANDSHAKE];
-		if (quic_tls_has_tx_sec(hel)) {
-			pktns = &qc->pktns[QUIC_TLS_PKTNS_HANDSHAKE];
-		}
-		else {
-			pktns = &qc->pktns[QUIC_TLS_PKTNS_INITIAL];
-		}
-		lpto = tick_add(now_ms, duration);
-		goto out;
-	}
+	/* RFC 9002 6.2.2.1. Before Address Validation
+	 *
+	 * the client MUST set the PTO timer if the client has not received an
+	 * acknowledgment for any of its Handshake packets and the handshake is
+	 * not confirmed (see Section 4.1.2 of [QUIC-TLS]), even if there are no
+	 * packets in flight.
+	 *
+	 * TODO implement the above paragraph for QUIC on backend side. Note
+	 * that if now_ms is used this function is not reentrant anymore and can
+	 * not be used anytime without side-effect (for example after QUIC
+	 * connection migration).
+	 */
 
 	lpto = TICK_ETERNITY;
 	pktns = p = &qc->pktns[QUIC_TLS_PKTNS_INITIAL];
@@ -118,7 +114,7 @@ struct quic_pktns *quic_pto_pktns(struct quic_conn *qc,
 
 		if (i == QUIC_TLS_PKTNS_01RTT) {
 			if (!handshake_confirmed) {
-				TRACE_STATE("handshake not already completed", QUIC_EV_CONN_SPTO, qc);
+				TRACE_STATE("TX PTO handshake not already confirmed", QUIC_EV_CONN_SPTO, qc);
 				pktns = p;
 				goto out;
 			}
@@ -128,7 +124,7 @@ struct quic_pktns *quic_pto_pktns(struct quic_conn *qc,
 
 		p = &qc->pktns[i];
 		tmp_pto = tick_add(p->tx.time_of_last_eliciting, duration);
-		if (!tick_isset(lpto) || tmp_pto < lpto) {
+		if (!tick_isset(lpto) || tick_is_lt(tmp_pto, lpto)) {
 			lpto = tmp_pto;
 			pktns = p;
 		}
@@ -166,7 +162,7 @@ void qc_packet_loss_lookup(struct quic_pktns *pktns, struct quic_conn *qc,
 		goto out;
 
 	ql = &qc->path->loss;
-	loss_delay = QUIC_MAX(ql->latest_rtt, ql->srtt >> 3);
+	loss_delay = QUIC_MAX(ql->latest_rtt, ql->srtt);
 	loss_delay = QUIC_MAX(loss_delay, MS_TO_TICKS(QUIC_TIMER_GRANULARITY)) *
 		QUIC_LOSS_TIME_THRESHOLD_MULTIPLICAND / QUIC_LOSS_TIME_THRESHOLD_DIVISOR;
 

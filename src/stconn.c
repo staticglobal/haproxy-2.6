@@ -510,6 +510,10 @@ struct appctx *sc_applet_create(struct stconn *sc, struct applet *app)
  */
 static inline int sc_cond_forward_shutw(struct stconn *sc)
 {
+	/* Foward the shutdown if an write error occurred on the input channel */
+	if (sc_ic(sc)->flags & CF_WRITE_TIMEOUT)
+		return 1;
+
 	/* The close must not be forwarded */
 	if (!(sc_ic(sc)->flags & CF_SHUTR) || !(sc->flags & SC_FL_NOHALF))
 		return 0;
@@ -1013,8 +1017,10 @@ static void sc_app_chk_snd_applet(struct stconn *sc)
 	if (unlikely(sc->state != SC_ST_EST || (oc->flags & CF_SHUTW)))
 		return;
 
-	/* we only wake the applet up if it was waiting for some data  and is ready to consume it */
-	if (!sc_ep_test(sc, SE_FL_WAIT_DATA) || sc_ep_test(sc, SE_FL_WONT_CONSUME))
+	/* we only wake the applet up if it was waiting for some data  and is ready to consume it
+	 * or if there is a pending shutdown
+	 */
+	if (!sc_ep_test(sc, SE_FL_WAIT_DATA|SE_FL_WONT_CONSUME) && !(oc->flags & CF_SHUTW_NOW))
 		return;
 
 	if (!tick_isset(oc->wex))
@@ -1061,7 +1067,7 @@ void sc_update_rx(struct stconn *sc)
 		 */
 		sc_have_room(sc);
 	}
-	if ((ic->flags & CF_EOI) || sc->flags & (SC_FL_WONT_READ|SC_FL_NEED_BUFF|SC_FL_NEED_ROOM))
+	if (sc->flags & (SC_FL_WONT_READ|SC_FL_NEED_BUFF|SC_FL_NEED_ROOM))
 		ic->rex = TICK_ETERNITY;
 	else if (!(ic->flags & CF_READ_NOEXP) && !tick_isset(ic->rex))
 		ic->rex = tick_add_ifset(now_ms, ic->rto);
@@ -1209,7 +1215,7 @@ static void sc_notify(struct stconn *sc)
 	sc_chk_rcv(sc);
 	sc_chk_rcv(sco);
 
-	if (ic->flags & (CF_EOI|CF_SHUTR) || sc_ep_test(sc, SE_FL_APPLET_NEED_CONN) ||
+	if (ic->flags & CF_SHUTR || sc_ep_test(sc, SE_FL_APPLET_NEED_CONN) ||
 	    (sc->flags & (SC_FL_WONT_READ|SC_FL_NEED_BUFF|SC_FL_NEED_ROOM))) {
 		ic->rex = TICK_ETERNITY;
 	}
@@ -1824,6 +1830,22 @@ void sc_conn_sync_send(struct stconn *sc)
 		return;
 
 	sc_conn_send(sc);
+
+	if (likely(oc->flags & CF_WRITE_ACTIVITY)) {
+		struct channel *ic = sc_ic(sc);
+
+		if (tick_isset(ic->rex) && !(sc->flags & SC_FL_INDEP_STR)) {
+			/* Note: to prevent the client from expiring read timeouts
+			 * during writes, we refresh it. We only do this if the
+			 * interface is not configured for "independent streams",
+			 * because for some applications it's better not to do this,
+			 * for instance when continuously exchanging small amounts
+			 * of data which can full the socket buffers long before a
+			 * write timeout is detected.
+			 */
+			ic->rex = tick_add_ifset(now_ms, ic->rto);
+		}
+	}
 }
 
 /* Called by I/O handlers after completion.. It propagates

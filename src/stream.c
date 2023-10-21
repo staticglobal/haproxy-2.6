@@ -1750,7 +1750,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 		      (CF_SHUTR|CF_READ_ACTIVITY|CF_READ_TIMEOUT|CF_SHUTW|
 		       CF_WRITE_ACTIVITY|CF_WRITE_TIMEOUT|CF_ANA_TIMEOUT)) &&
 		    !(s->flags & SF_CONN_EXP) &&
-		    !((sc_ep_get(scf) | scb->flags) & SE_FL_ERROR) &&
+		    !((sc_ep_get(scf) | sc_ep_get(scb)) & SE_FL_ERROR) &&
 		    ((s->pending_events & TASK_WOKEN_ANY) == TASK_WOKEN_TIMER)) {
 			scf->flags &= ~SC_FL_DONT_WAKE;
 			scb->flags &= ~SC_FL_DONT_WAKE;
@@ -2341,7 +2341,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 
 	/* shutdown(write) pending */
 	if (unlikely((req->flags & (CF_SHUTW|CF_SHUTW_NOW)) == CF_SHUTW_NOW &&
-		     channel_is_empty(req))) {
+		     (channel_is_empty(req)  || (req->flags & CF_WRITE_TIMEOUT)))) {
 		if (req->flags & CF_READ_ERROR)
 			scb->flags |= SC_FL_NOLINGER;
 		sc_shutw(scb);
@@ -2468,7 +2468,7 @@ struct task *process_stream(struct task *t, void *context, unsigned int state)
 
 	/* shutdown(write) pending */
 	if (unlikely((res->flags & (CF_SHUTW|CF_SHUTW_NOW)) == CF_SHUTW_NOW &&
-		     channel_is_empty(res))) {
+		     (channel_is_empty(res) || (res->flags & CF_WRITE_TIMEOUT)))) {
 		sc_shutw(scf);
 	}
 
@@ -3908,6 +3908,13 @@ static struct action_kw_list stream_http_res_keywords = { ILH, {
 }};
 
 INITCALL1(STG_REGISTER, http_res_keywords_register, &stream_http_res_keywords);
+
+static struct action_kw_list stream_http_after_res_actions =  { ILH, {
+	{ "set-log-level", stream_parse_set_log_level },
+	{ /* END */ }
+}};
+
+INITCALL1(STG_REGISTER, http_after_res_keywords_register, &stream_http_after_res_actions);
 
 static int smp_fetch_cur_server_timeout(const struct arg *args, struct sample *smp, const char *km, void *private)
 {

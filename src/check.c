@@ -1380,6 +1380,7 @@ int start_check_task(struct check *check, int mininter,
 			    int nbcheck, int srvpos)
 {
 	struct task *t;
+	ulong boottime = tv_ms_remain(&start_date, &ready_date);
 
 	/* task for the check. Process-based checks exclusively run on thread 1. */
 	if (check->type == PR_O2_EXT_CHK)
@@ -1397,11 +1398,19 @@ int start_check_task(struct check *check, int mininter,
 	if (mininter < srv_getinter(check))
 		mininter = srv_getinter(check);
 
+	if (global.spread_checks > 0) {
+		int rnd;
+
+		rnd  = srv_getinter(check) * global.spread_checks / 100;
+		rnd -= (int) (2 * rnd * (ha_random32() / 4294967295.0));
+		mininter += rnd;
+	}
+
 	if (global.max_spread_checks && mininter > global.max_spread_checks)
 		mininter = global.max_spread_checks;
 
 	/* check this every ms */
-	t->expire = tick_add(now_ms, MS_TO_TICKS(mininter * srvpos / nbcheck));
+	t->expire = tick_add(now_ms, MS_TO_TICKS(boottime + mininter * srvpos / nbcheck));
 	check->start = now;
 	task_queue(t);
 

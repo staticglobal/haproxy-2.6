@@ -3,7 +3,7 @@
                           Configuration Manual
                          ----------------------
                               version 2.6
-                              2023/03/28
+                              2023/08/09
 
 
 This document covers the configuration language as implemented in the version
@@ -42,7 +42,8 @@ Summary
 2.3.      Environment variables
 2.4.      Conditional blocks
 2.5.      Time format
-2.6.      Examples
+2.6.      Size format
+2.7.      Examples
 
 3.    Global parameters
 3.1.      Process management and security
@@ -585,19 +586,28 @@ As a result, here is the matrix indicating how special characters can be
 entered in different contexts (unprintable characters are replaced with their
 name within angle brackets). Note that some characters that may only be
 represented escaped have no possible representation inside single quotes,
-hence the '-' there:
+hence its absence there:
 
   Character  |  Unquoted     |  Weakly quoted              |  Strongly quoted
   -----------+---------------+-----------------------------+-----------------
     <TAB>    |  \<TAB>, \x09 |  "<TAB>", "\<TAB>", "\x09"  |  '<TAB>'
-    <LF>     |  \n, \x0a     |  "\n", "\x0a"               |   -
-    <CR>     |  \r, \x0d     |  "\r", "\x0d"               |   -
+  -----------+---------------+-----------------------------+-----------------
+    <LF>     |  \n, \x0a     |  "\n", "\x0a"               |
+  -----------+---------------+-----------------------------+-----------------
+    <CR>     |  \r, \x0d     |  "\r", "\x0d"               |
+  -----------+---------------+-----------------------------+-----------------
     <SPC>    |  \<SPC>, \x20 |  "<SPC>", "\<SPC>", "\x20"  |  '<SPC>'
+  -----------+---------------+-----------------------------+-----------------
     "        |  \", \x22     |  "\"", "\x22"               |  '"'
+  -----------+---------------+-----------------------------+-----------------
     #        |  \#, \x23     |  "#", "\#", "\x23"          |  '#'
+  -----------+---------------+-----------------------------+-----------------
     $        |  $, \$, \x24  |  "\$", "\x24"               |  '$'
-    '        |  \', \x27     |  "'", "\'", "\x27"          |   -
+  -----------+---------------+-----------------------------+-----------------
+    '        |  \', \x27     |  "'", "\'", "\x27"          |
+  -----------+---------------+-----------------------------+-----------------
     \        |  \\, \x5c     |  "\\", "\x5c"               |  '\'
+  -----------+---------------+-----------------------------+-----------------
 
   Example:
       # those are all strictly equivalent:
@@ -944,7 +954,23 @@ for every keyword. Supported units are :
   - d  : days.    1d = 24h = 1440m = 86400s = 86400000ms
 
 
-2.6. Examples
+2.6. Size format
+----------------
+
+Some parameters involve values representing size, such as bandwidth limits.
+These values are generally expressed in bytes (unless explicitly stated
+otherwise) but may be expressed in any other unit by suffixing the unit to the
+numeric value. It is important to consider this because it will not be repeated
+for every keyword. Supported units are case insensitive :
+
+  - k : kilobytes. 1 kilobyte = 1024 bytes
+  - m : megabytes. 1 megabyte = 1048576 bytes
+  - g : gigabytes. 1 gigabyte = 1073741824 bytes
+
+Both time and size formats require integers, decimal notation is not allowed.
+
+
+2.7. Examples
 -------------
 
     # Simple configuration for an HTTP proxy listening on port 80 on all
@@ -1112,6 +1138,7 @@ The following keywords are supported in the "global" section :
    - tune.h2.header-table-size
    - tune.h2.initial-window-size
    - tune.h2.max-concurrent-streams
+   - tune.h2.max-frame-size
    - tune.http.cookielen
    - tune.http.logurilen
    - tune.http.maxhdr
@@ -2672,6 +2699,11 @@ ssl-engine <name> [algo <comma-separated list of algorithms>]
   openssl configuration file uses:
   https://www.openssl.org/docs/man1.0.2/apps/config.html
 
+  HAProxy Version 2.6 disabled the support for engines in the default build.
+  This option is only available when HAProxy has been built with support for
+  it.  In case the ssl-engine is required HAProxy can be rebuild with the
+  USE_ENGINE=1 flag.
+
 ssl-mode-async
   Adds SSL_MODE_ASYNC mode to the SSL context. This enables asynchronous TLS
   I/O operations if asynchronous capable SSL engines are used. The current
@@ -3307,7 +3339,8 @@ peers <peersect>
   Creates a new peer list with name <peersect>. It is an independent section,
   which is referenced by one or more stick-tables.
 
-bind [<address>]:<port_range> [, ...] [param*]
+bind [<address>]:port [param*]
+bind /<path> [param*]
   Defines the binding parameters of the local peer of this "peers" section.
   Such lines are not supported with "peer" line in the same "peers" section.
 
@@ -3342,16 +3375,17 @@ log <address> [len <length>] [format <format>] [sample <ranges>:<sample_size>]
   log information about the "peers" listener. See "log" option for proxies for
   more details.
 
-peer <peername> <ip>:<port> [param*]
+peer <peername> [<address>]:port [param*]
+peer <peername> /<path> [param*]
   Defines a peer inside a peers section.
   If <peername> is set to the local peer name (by default hostname, or forced
   using "-L" command line option or "localpeer" global configuration setting),
-  HAProxy will listen for incoming remote peer connection on <ip>:<port>.
-  Otherwise, <ip>:<port> defines where to connect to in order to join the
-  remote peer, and <peername> is used at the protocol level to identify and
+  HAProxy will listen for incoming remote peer connection on the provided
+  address.  Otherwise, the address defines where to connect to in order to join
+  the remote peer, and <peername> is used at the protocol level to identify and
   validate the remote peer on the server side.
 
-  During a soft restart, local peer <ip>:<port> is used by the old instance to
+  During a soft restart, local peer address is used by the old instance to
   connect the new one and initiate a complete replication (teaching process).
 
   It is strongly recommended to have the exact same peers declaration on all
@@ -3365,12 +3399,13 @@ peer <peername> <ip>:<port> [param*]
   Note: "peer" keyword may transparently be replaced by "server" keyword (see
   "server" keyword explanation below).
 
-server <peername> [<ip>:<port>] [param*]
+server <peername> [<address>:<port>] [param*]
+server <peername> [/<path>] [param*]
   As previously mentioned, "peer" keyword may be replaced by "server" keyword
   with a support for all "server" parameters found in 5.2 paragraph that are
-  related to transport settings. If the underlying peer is local, <ip>:<port>
-  parameters must not be present; these parameters must be provided on a "bind"
-  line (see "bind" keyword of this "peers" section).
+  related to transport settings. If the underlying peer is local, the address
+  parameter must not be present; it must be provided on a "bind" line (see
+  "bind" keyword of this "peers" section).
 
   A number of "server" parameters are irrelevant for "peers" sections. Peers by
   nature do not support dynamic host name resolution nor health checks, hence
@@ -5671,10 +5706,19 @@ http-after-response <action> <options...> [ { if | unless } <condition> ]
     - add-header <name> <fmt>
     - allow
     - capture <sample> id <id>
+    - del-acl(<file-name>) <key fmt>
     - del-header <name> [ -m <meth> ]
+    - del-map(<file-name>) <key fmt>
     - replace-header <name> <regex-match> <replace-fmt>
     - replace-value <name> <regex-match> <replace-fmt>
+    - sc-inc-gpc(<idx>,<sc-id>)
+    - sc-inc-gpc0(<sc-id>)
+    - sc-inc-gpc1(<sc-id>)
+    - sc-set-gpt(<idx>,<sc-id>) { <int> | <expr> }
+    - sc-set-gpt0(<sc-id>) { <int> | <expr> }
     - set-header <name> <fmt>
+    - set-log-level <level>
+    - set-map(<file-name>) <key fmt> <value fmt>
     - set-status <status> [reason <str>]
     - set-var(<var-name>[,<cond>...]) <expr>
     - set-var-fmt(<var-name>[,<cond>...]) <fmt>
@@ -5719,10 +5763,20 @@ http-after-response capture <sample> id <id> [ { if | unless } <condition> ]
   converts it to a string. Please refer to "http-response capture" for a
   complete description.
 
+http-after-response del-acl(<file-name>) <key fmt> [ { if | unless } <condition> ]
+
+  This is used to delete an entry from an ACL. Please refer to "http-request
+  del-acl" for a complete description.
+
 http-after-response del-header <name> [ -m <meth> ] [ { if | unless } <condition> ]
 
   This removes all HTTP header fields whose name is specified in <name>. Please
   refer to "http-request del-header" for a complete description.
+
+http-after-response del-map(<file-name>) <key fmt> [ { if | unless } <condition> ]
+
+  This is used to delete an entry from a MAP. Please refer to "http-request
+  del-map" for a complete description.
 
 http-after-response replace-header <name> <regex-match> <replace-fmt>
                                    [ { if | unless } <condition> ]
@@ -5753,6 +5807,34 @@ http-after-response replace-value <name> <regex-match> <replace-fmt>
 
     # outputs:
     Cache-Control: max-age=3600, private
+
+http-after-response sc-inc-gpc(<idx>,<sc-id>) [ { if | unless } <condition> ]
+http-after-response sc-inc-gpc0(<sc-id>) [ { if | unless } <condition> ]
+http-after-response sc-inc-gpc1(<sc-id>) [ { if | unless } <condition> ]
+
+  These actions increment the General Purppose Counters according to the sticky
+  counter designated by <sc-id>. Please refer to "http-request sc-inc-gpc",
+  "http-request sc-inc-gpc0" and "http-request sc-inc-gpc1" for a complete
+  description.
+
+http-after-response sc-set-gpt(<idx>,<sc-id>) { <int> | <expr> }
+                                              [ { if | unless } <condition> ]
+http-after-response sc-set-gpt0(<sc-id>) { <int> | <expr> }
+                                         [ { if | unless } <condition> ]
+
+  These actions set the 32-bit unsigned General Purpose Tags according to the
+  sticky counter designated by <sc-id>. Please refer to "http-request
+  sc-set-gpt" and "http-request sc-set-gpt0" for a complete description.
+
+http-after-response set-log-level <level> [ { if | unless } <condition> ]
+
+  This is used to change the log level of the current response. Please refer to
+  "http-request set-log-level" for a complete description.
+
+http-after-response set-map(<file-name>) <key fmt> <value fmt>
+
+  This is used to add a new entry into a MAP. Please refer to "http-request
+  set-map" for a complete description.
 
 http-after-response set-header <name> <fmt> [ { if | unless } <condition> ]
 
@@ -7711,7 +7793,7 @@ http-response sc-set-gpt0(<sc-id>) { <int> | <expr> }
 
   These actions set the 32-bit unsigned General Purpose Tags according to the
   sticky counter designated by <sc-id>. Please refer to "http-request
-  sc-inc-gpt" and "http-request sc-inc-gpt0" for a complete description.
+  sc-set-gpt" and "http-request sc-set-gpt0" for a complete description.
 
 http-response send-spoe-group <engine-name> <group-name>
                               [ { if | unless } <condition> ]
@@ -8527,6 +8609,8 @@ no option accept-invalid-http-request
   option also relaxes the test on the HTTP version, it allows HTTP/0.9 requests
   to pass through (no version specified), as well as different protocol names
   (e.g. RTSP), and multiple digits for both the major and the minor version.
+  Finally, this option also allows incoming URLs to contain fragment references
+  ('#' after the path).
 
   This option should never be enabled by default as it hides application bugs
   and open security breaches. It should only be deployed after a problem has
@@ -12553,7 +12637,7 @@ tcp-request connection sc-set-gpt0(<sc-id>) { <int> | <expr> }
 
   These actions set the 32-bit unsigned General Purpose Tags according to the
   sticky counter designated by <sc-id>. Please refer to "http-request
-  sc-inc-gpt" and "http-request sc-inc-gpt0" for a complete description.
+  sc-set-gpt" and "http-request sc-set-gpt0" for a complete description.
 
 tcp-request connection set-dst <expr> [ { if | unless } <condition> ]
 tcp-request connection set-dst-port <expr> [ { if | unless } <condition> ]
@@ -12841,7 +12925,7 @@ tcp-request content sc-set-gpt0(<sc-id>) { <int> | <expr> }
 
   These actions set the 32-bit unsigned General Purpose Tags according to the
   sticky counter designated by <sc-id>. Please refer to "http-request
-  sc-inc-gpt" and "http-request sc-inc-gpt0" for a complete description.
+  sc-set-gpt" and "http-request sc-set-gpt0" for a complete description.
 
 tcp-request content send-spoe-group <engine-name> <group-name>
                     [ { if | unless } <condition> ]
@@ -12976,6 +13060,9 @@ tcp-request inspect-delay <timeout>
   and will immediately apply a verdict based on the available information.
   Obviously this is unlikely to be very useful and might even be racy, so such
   setups are not recommended.
+
+  Note the inspection delay is shortened if an connection error or shutdown is
+  experienced or if the request buffer appears as full.
 
   As soon as a rule matches, the request is released and continues as usual. If
   the timeout is reached and no rule matches, the default policy will be to let
@@ -13125,7 +13212,7 @@ tcp-request session sc-set-gpt0(<sc-id>) { <int> | <expr> }
 
   These actions set the 32-bit unsigned General Purpose Tags according to the
   sticky counter designated by <sc-id>. Please refer to "tcp-request connection
-  sc-inc-gpt" and "tcp-request connection sc-inc-gpt0" for a complete
+  sc-set-gpt" and "tcp-request connection sc-set-gpt0" for a complete
   description.
 
 tcp-request session set-dst <expr> [ { if | unless } <condition> ]
@@ -13285,7 +13372,7 @@ tcp-resposne content sc-set-gpt0(<sc-id>) { <int> | <expr> }
 
   These actions set the 32-bit unsigned General Purpose Tags according to the
   sticky counter designated by <sc-id>. Please refer to "http-request
-  sc-inc-gpt" and "http-request sc-inc-gpt0" for a complete description.
+  sc-set-gpt" and "http-request sc-set-gpt0" for a complete description.
 
 tcp-response content send-spoe-group <engine-name> <group-name>
                      [ { if | unless } <condition> ]
@@ -14105,7 +14192,8 @@ crt <cert>
   Indication field matching one of their CN or alt subjects. Wildcards are
   supported, where a wildcard character '*' is used instead of the first
   hostname component (e.g. *.example.org matches www.example.org but not
-  www.sub.example.org).
+  www.sub.example.org). If an empty directory is used, HAProxy will not start
+  unless the "strict-sni" keyword is used.
 
   If no SNI is provided by the client or if the SSL library does not support
   TLS extensions, or if the client provides an SNI hostname which does not
@@ -14565,8 +14653,11 @@ ssl-min-ver [ SSLv3 | TLSv1.0 | TLSv1.1 | TLSv1.2 | TLSv1.3 ]
 strict-sni
   This setting is only available when support for OpenSSL was built in. The
   SSL/TLS negotiation is allow only if the client provided an SNI which match
-  a certificate. The default certificate is not used.
-  See the "crt" option for more information.
+  a certificate. The default certificate is not used. This option also allows
+  to start without any certificate on a bind line, so an empty directory could
+  be used and filled later from the stats socket.
+  See the "crt" option for more information. See "add ssl crt-list" command in
+  the management guide.
 
 tcp-ut <delay>
   Sets the TCP User Timeout for all incoming connections instantiated from this
@@ -17284,7 +17375,7 @@ jwt_verify(<alg>,<key>)
      # JOSE header and use a public certificate to verify a signature
      http-request set-var(txn.bearer) http_auth_bearer
      http-request set-var(txn.jwt_alg) var(txn.bearer),jwt_header_query('$.alg')
-     http-request deny unless { var(txn.jwt_alg) "RS256" }
+     http-request deny unless { var(txn.jwt_alg) -m str "RS256" }
      http-request deny unless { var(txn.bearer),jwt_verify(txn.jwt_alg,"/path/to/crt.pem") 1 }
 
 language(<value>[,<default>])
@@ -18885,9 +18976,9 @@ fc_sacked : integer
   before 2.4, the sample fetch fails.
 
 fc_src : ip
-  This is the original destination IP address of the connection on the client
-  side. Only "tcp-request connection" rules may alter this address. See "src"
-  for details.
+  This is the original source IP address of the connection on the client side
+  Only "tcp-request connection" rules may alter this address. See "src" for
+  details.
 
 fc_src_is_local : boolean
   Returns true if the source address of incoming connection is local to the
@@ -19566,7 +19657,7 @@ future information. Those generally include the results of SSL negotiations.
 ssl_bc : boolean
   Returns true when the back connection was made via an SSL/TLS transport
   layer and is locally deciphered. This means the outgoing connection was made
-  other a server with the "ssl" option. It can be used in a tcp-check or an
+  to a server with the "ssl" option. It can be used in a tcp-check or an
   http-check ruleset.
 
 ssl_bc_alg_keysize : integer
@@ -20902,7 +20993,11 @@ path : string
   information from databases and keep them in caches. Note that with outgoing
   caches, it would be wiser to use "url" instead. With ACLs, it's typically
   used to match exact file names (e.g. "/login.php"), or directory parts using
-  the derivative forms. See also the "url" and "base" fetch methods.
+  the derivative forms. See also the "url" and "base" fetch methods. Please
+  note that any fragment reference in the URI ('#' after the path) is strictly
+  forbidden by the HTTP standard and will be rejected. However, if the frontend
+  receiving the request has "option accept-invalid-http-request", then this
+  fragment part will be accepted and will also appear in the path.
 
   ACL derivatives :
     path     : exact string match
@@ -20920,7 +21015,11 @@ pathq : string
   relative URI, excluding the scheme and the authority part, if any. Indeed,
   while it is the common representation for an HTTP/1.1 request target, in
   HTTP/2, an absolute URI is often used. This sample fetch will return the same
-  result in both cases.
+  result in both cases. Please note that any fragment reference in the URI ('#'
+  after the path) is strictly forbidden by the HTTP standard and will be
+  rejected. However, if the frontend receiving the request has "option
+  accept-invalid-http-request", then this fragment part will be accepted and
+  will also appear in the path.
 
 query : string
   This extracts the request's query string, which starts after the first
@@ -20939,8 +21038,14 @@ req.hdr_names([<delim>]) : string
 req.ver : string
 req_ver : string (deprecated)
   Returns the version string from the HTTP request, for example "1.1". This can
-  be useful for logs, but is mostly there for ACL. Some predefined ACL already
-  check for versions 1.0 and 1.1.
+  be useful for ACL. For logs use the "%HV" log variable. Some predefined ACL
+  already check for versions 1.0 and 1.1.
+
+  Common values are "1.0", "1.1", "2.0" or "3.0".
+
+  In the case of http/2 and http/3, the value is not extracted from the HTTP
+  version in the request line but is determined by the negociated protocol
+  version.
 
   ACL derivatives :
     req.ver : exact string match
@@ -21153,7 +21258,11 @@ url : string
   "path" is preferred over using "url", because clients may send a full URL as
   is normally done with proxies. The only real use is to match "*" which does
   not match in "path", and for which there is already a predefined ACL. See
-  also "path" and "base".
+  also "path" and "base". Please note that any fragment reference in the URI
+  ('#' after the path) is strictly forbidden by the HTTP standard and will be
+  rejected. However, if the frontend receiving the request has "option
+  accept-invalid-http-request", then this fragment part will be accepted and
+  will also appear in the url.
 
   ACL derivatives :
     url     : exact string match
@@ -22385,6 +22494,13 @@ Timings events in TCP mode:
     untrusted network. A value of "-1" here means that the last the response
     header (empty line) was never seen, most likely because the server timeout
     stroke before the server managed to process the request.
+
+  - Td: this is the total transfer time of the response payload till the last
+    byte sent to the client. In HTTP it starts after the last response header
+    (after Tr).
+
+    The data sent are not guaranteed to be received by the client, they can be
+    stuck in either the kernel or the network.
 
   - Ta: total active time for the HTTP request, between the moment the proxy
     received the first byte of the request header and the emission of the last

@@ -170,7 +170,7 @@ static int quic_transport_param_dec_version_info(struct tp_version_information *
                                                  const unsigned char *end, int server)
 {
 	size_t tp_len = end - *buf;
-	const uint32_t *ver;
+	const uint32_t *ver, *others;
 
 	/* <tp_len> must be a multiple of sizeof(uint32_t) */
 	if (tp_len < sizeof tp->choosen || (tp_len & 0x3))
@@ -182,10 +182,10 @@ static int quic_transport_param_dec_version_info(struct tp_version_information *
 		return 0;
 
 	*buf += sizeof tp->choosen;
-	tp->others = (const uint32_t *)*buf;
+	others = (const uint32_t *)*buf;
 
 	/* Others versions must not be null */
-	for (ver = tp->others; ver < (const uint32_t *)end; ver++) {
+	for (ver = others; ver < (const uint32_t *)end; ver++) {
 		if (!*ver)
 			return 0;
 	}
@@ -194,8 +194,7 @@ static int quic_transport_param_dec_version_info(struct tp_version_information *
 		/* TODO: not supported */
 		return 0;
 
-	tp->nb_others = (end - (const unsigned char *)tp->others) / sizeof *tp->others;
-	for (ver = tp->others; ver < (const uint32_t *)end; ver++) {
+	for (ver = others; ver < (const uint32_t *)end; ver++) {
 		if (!tp->negotiated_version) {
 			int i;
 

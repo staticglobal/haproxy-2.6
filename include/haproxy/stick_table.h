@@ -45,7 +45,7 @@ void stksess_free(struct stktable *t, struct stksess *ts);
 int stksess_kill(struct stktable *t, struct stksess *ts, int decrefcount);
 
 int stktable_init(struct stktable *t);
-int stktable_parse_type(char **args, int *idx, unsigned long *type, size_t *key_size);
+int stktable_parse_type(char **args, int *idx, unsigned long *type, size_t *key_size, const char *file, int linenum);
 int parse_stick_table(const char *file, int linenum, char **args,
                       struct stktable *t, char *id, char *nid, struct peers *peers);
 struct stksess *stktable_get_entry(struct stktable *table, struct stktable_key *key);

@@ -152,7 +152,7 @@ lua_State *hlua_init_state(int thread_id);
 /* This function takes the Lua global lock. Keep this function's visibility
  * global so that it can appear in stack dumps and performance profiles!
  */
-void lua_take_global_lock()
+static inline void lua_take_global_lock()
 {
 	HA_SPIN_LOCK(LUA_LOCK, &hlua_global_lock);
 }
@@ -162,16 +162,44 @@ static inline void lua_drop_global_lock()
 	HA_SPIN_UNLOCK(LUA_LOCK, &hlua_global_lock);
 }
 
+/* lua lock helpers: only lock when required
+ *
+ * state_id == 0: we're operating on the main lua stack (shared between
+ * os threads), so we need to acquire the main lock
+ *
+ * If the thread already owns the lock (_hlua_locked != 0), skip the lock
+ * attempt. This could happen if we run under protected lua environment.
+ * Not doing this could result in deadlocks because of nested locking
+ * attempts from the same thread
+ */
+static THREAD_LOCAL int _hlua_locked = 0;
+static inline void hlua_lock(struct hlua *hlua)
+{
+	if (hlua->state_id != 0)
+		return;
+	if (!_hlua_locked)
+		lua_take_global_lock();
+	_hlua_locked += 1;
+}
+static inline void hlua_unlock(struct hlua *hlua)
+{
+	if (hlua->state_id != 0)
+		return;
+	BUG_ON(_hlua_locked <= 0);
+	_hlua_locked--;
+	/* drop the lock once the lock count reaches 0 */
+	if (!_hlua_locked)
+		lua_drop_global_lock();
+}
+
 #define SET_SAFE_LJMP_L(__L, __HLUA) \
 	({ \
 		int ret; \
-		if ((__HLUA)->state_id == 0) \
-			lua_take_global_lock(); \
+		hlua_lock(__HLUA); \
 		if (setjmp(safe_ljmp_env) != 0) { \
 			lua_atpanic(__L, hlua_panic_safe); \
 			ret = 0; \
-			if ((__HLUA)->state_id == 0) \
-				lua_drop_global_lock(); \
+			hlua_unlock(__HLUA); \
 		} else { \
 			lua_atpanic(__L, hlua_panic_ljmp); \
 			ret = 1; \
@@ -185,8 +213,7 @@ static inline void lua_drop_global_lock()
 #define RESET_SAFE_LJMP_L(__L, __HLUA) \
 	do { \
 		lua_atpanic(__L, hlua_panic_safe); \
-		if ((__HLUA)->state_id == 0) \
-			lua_drop_global_lock(); \
+		hlua_unlock(__HLUA); \
 	} while(0)
 
 #define SET_SAFE_LJMP(__HLUA) \
@@ -472,7 +499,8 @@ static inline int reg_flt_to_stack_id(struct hlua_reg_filter *reg_flt)
 
 /* Used to check an Lua function type in the stack. It creates and
  * returns a reference of the function. This function throws an
- * error if the rgument is not a "function".
+ * error if the argument is not a "function".
+ * When no longer used, the ref must be released with hlua_unref()
  */
 __LJMP unsigned int hlua_checkfunction(lua_State *L, int argno)
 {
@@ -486,7 +514,8 @@ __LJMP unsigned int hlua_checkfunction(lua_State *L, int argno)
 
 /* Used to check an Lua table type in the stack. It creates and
  * returns a reference of the table. This function throws an
- * error if the rgument is not a "table".
+ * error if the argument is not a "table".
+ * When no longer used, the ref must be released with hlua_unref()
  */
 __LJMP unsigned int hlua_checktable(lua_State *L, int argno)
 {
@@ -496,6 +525,46 @@ __LJMP unsigned int hlua_checktable(lua_State *L, int argno)
 	}
 	lua_pushvalue(L, argno);
 	return luaL_ref(L, LUA_REGISTRYINDEX);
+}
+
+/* Get a reference to the object that is at the top of the stack
+ * The referenced object will be popped from the stack
+ *
+ * The function returns the reference to the object which must
+ * be cleared using hlua_unref() when no longer used
+ */
+__LJMP int hlua_ref(lua_State *L)
+{
+	return MAY_LJMP(luaL_ref(L, LUA_REGISTRYINDEX));
+}
+
+/* Pushes a reference previously created using luaL_ref(L, LUA_REGISTRYINDEX)
+ * on <L> stack
+ * (ie: hlua_checkfunction(), hlua_checktable() or hlua_ref())
+ *
+ * When the reference is no longer used, it should be released by calling
+ * hlua_unref()
+ *
+ * <L> can be from any co-routine as long as it belongs to the same lua
+ * parent state that the one used to get the reference.
+ */
+void hlua_pushref(lua_State *L, int ref)
+{
+	lua_rawgeti(L, LUA_REGISTRYINDEX, ref);
+}
+
+/* Releases a reference previously created using luaL_ref(L, LUA_REGISTRYINDEX)
+ * (ie: hlua_checkfunction(), hlua_checktable() or hlua_ref())
+ *
+ * This will allow the reference to be reused and the referred object
+ * to be garbage collected.
+ *
+ * <L> can be from any co-routine as long as it belongs to the same lua
+ * parent state that the one used to get the reference.
+ */
+void hlua_unref(lua_State *L, int ref)
+{
+	luaL_unref(L, LUA_REGISTRYINDEX, ref);
 }
 
 __LJMP const char *hlua_traceback(lua_State *L, const char* sep)
@@ -1168,7 +1237,7 @@ static inline void hlua_sendlog(struct proxy *px, int level, const char *msg)
 /* This function just ensure that the yield will be always
  * returned with a timeout and permit to set some flags
  */
-__LJMP void hlua_yieldk(lua_State *L, int nresults, int ctx,
+__LJMP void hlua_yieldk(lua_State *L, int nresults, lua_KContext ctx,
                         lua_KFunction k, int timeout, unsigned int flags)
 {
 	struct hlua *hlua;
@@ -1198,21 +1267,12 @@ __LJMP void hlua_yieldk(lua_State *L, int nresults, int ctx,
  * initialisation fails (example: out of memory error), the lua function
  * throws an error (longjmp).
  *
- * In some case (at least one), this function can be called from safe
- * environment, so we must not initialise it. While the support of
- * threads appear, the safe environment set a lock to ensure only one
- * Lua execution at a time. If we initialize safe environment in another
- * safe environment, we have a dead lock.
- *
- * set "already_safe" true if the context is initialized form safe
- * Lua function.
- *
  * This function manipulates two Lua stacks: the main and the thread. Only
  * the main stack can fail. The thread is not manipulated. This function
  * MUST NOT manipulate the created thread stack state, because it is not
  * protected against errors thrown by the thread stack.
  */
-int hlua_ctx_init(struct hlua *lua, int state_id, struct task *task, int already_safe)
+int hlua_ctx_init(struct hlua *lua, int state_id, struct task *task)
 {
 	lua->Mref = LUA_REFNIL;
 	lua->flags = 0;
@@ -1221,24 +1281,20 @@ int hlua_ctx_init(struct hlua *lua, int state_id, struct task *task, int already
 	lua->state_id = state_id;
 	LIST_INIT(&lua->com);
 	MT_LIST_INIT(&lua->hc_list);
-	if (!already_safe) {
-		if (!SET_SAFE_LJMP_PARENT(lua)) {
-			lua->Tref = LUA_REFNIL;
-			return 0;
-		}
+	if (!SET_SAFE_LJMP_PARENT(lua)) {
+		lua->Tref = LUA_REFNIL;
+		return 0;
 	}
 	lua->T = lua_newthread(hlua_states[state_id]);
 	if (!lua->T) {
 		lua->Tref = LUA_REFNIL;
-		if (!already_safe)
-			RESET_SAFE_LJMP_PARENT(lua);
+		RESET_SAFE_LJMP_PARENT(lua);
 		return 0;
 	}
 	hlua_sethlua(lua);
 	lua->Tref = luaL_ref(hlua_states[state_id], LUA_REGISTRYINDEX);
 	lua->task = task;
-	if (!already_safe)
-		RESET_SAFE_LJMP_PARENT(lua);
+	RESET_SAFE_LJMP_PARENT(lua);
 	return 1;
 }
 
@@ -1272,7 +1328,7 @@ static void hlua_httpclient_destroy_all(struct hlua *hlua)
 
 /* Used to destroy the Lua coroutine when the attached stream or task
  * is destroyed. The destroy also the memory context. The struct "lua"
- * is not freed.
+ * will be freed.
  */
 void hlua_ctx_destroy(struct hlua *lua)
 {
@@ -1437,8 +1493,7 @@ static enum hlua_exec hlua_ctx_resume(struct hlua *lua, int yield_allowed)
 	/* Lock the whole Lua execution. This lock must be before the
 	 * label "resume_execution".
 	 */
-	if (lua->state_id == 0)
-		lua_take_global_lock();
+	hlua_lock(lua);
 
 resume_execution:
 
@@ -1466,6 +1521,15 @@ resume_execution:
 #else
 	ret = lua_resume(lua->T, hlua_states[lua->state_id], lua->nargs);
 #endif
+
+	/* reset nargs because those possibly passed to the lua_resume() call
+	 * were already consumed, and since we may call lua_resume() again
+	 * after a successful yield, we don't want to pass stale nargs hint
+	 * to the Lua API. As such, nargs should be set explicitly before each
+	 * lua_resume() (or hlua_ctx_resume()) invocation if needed.
+	 */
+	lua->nargs = 0;
+
 	switch (ret) {
 
 	case LUA_OK:
@@ -1521,7 +1585,6 @@ resume_execution:
 		}
 		msg = lua_tostring(lua->T, -1);
 		lua_settop(lua->T, 0); /* Empty the stack. */
-		lua_pop(lua->T, 1);
 		trace = hlua_traceback(lua->T, ", ");
 		if (msg)
 			lua_pushfstring(lua->T, "[state-id %d] runtime error: %s from %s", lua->state_id, msg, trace);
@@ -1544,7 +1607,6 @@ resume_execution:
 		}
 		msg = lua_tostring(lua->T, -1);
 		lua_settop(lua->T, 0); /* Empty the stack. */
-		lua_pop(lua->T, 1);
 		if (msg)
 			lua_pushfstring(lua->T, "[state-id %d] message handler error: %s", lua->state_id, msg);
 		else
@@ -1585,8 +1647,7 @@ resume_execution:
 	}
 
 	/* This is the main exit point, remove the Lua lock. */
-	if (lua->state_id == 0)
-		lua_drop_global_lock();
+	hlua_unlock(lua);
 
 	return ret;
 }
@@ -4429,7 +4490,9 @@ __LJMP static int hlua_applet_tcp_set_var(lua_State *L)
 	memset(&smp, 0, sizeof(smp));
 	hlua_lua2smp(L, 3, &smp);
 
-	/* Store the sample in a variable. */
+	/* Store the sample in a variable. We don't need to dup the smp, vars API
+	 * already takes care of duplicating dynamic var data.
+	 */
 	smp_set_owner(&smp, s->be, s->sess, s, 0);
 
 	if (lua_gettop(L) == 4 && lua_toboolean(L, 4))
@@ -4918,7 +4981,9 @@ __LJMP static int hlua_applet_http_set_var(lua_State *L)
 	memset(&smp, 0, sizeof(smp));
 	hlua_lua2smp(L, 3, &smp);
 
-	/* Store the sample in a variable. */
+	/* Store the sample in a variable. We don't need to dup the smp, vars API
+	 * already takes care of duplicating dynamic var data.
+	 */
 	smp_set_owner(&smp, s->be, s->sess, s, 0);
 
 	if (lua_gettop(L) == 4 && lua_toboolean(L, 4))
@@ -7525,7 +7590,9 @@ __LJMP static int hlua_set_var(lua_State *L)
 	memset(&smp, 0, sizeof(smp));
 	hlua_lua2smp(L, 3, &smp);
 
-	/* Store the sample in a variable. */
+	/* Store the sample in a variable. We don't need to dup the smp, vars API
+	 * already takes care of duplicating dynamic var data.
+	 */
 	smp_set_owner(&smp, htxn->p, htxn->s->sess, htxn->s, htxn->dir & SMP_OPT_DIR);
 
 	if (lua_gettop(L) == 4 && lua_toboolean(L, 4))
@@ -8564,6 +8631,51 @@ struct task *hlua_process_task(struct task *task, void *context, unsigned int st
 	return task;
 }
 
+/* Helper function to prepare the lua ctx for a given stream
+ *
+ * ctx will be enforced in <state_id> parent stack on initial creation.
+ * If s->hlua->state_id differs from <state_id>, which may happen at
+ * runtime since existing stream hlua ctx will be reused for other
+ * "independent" (but stream-related) lua executions, hlua will be
+ * recreated with the expected state id.
+ *
+ * Returns 1 for success and 0 for failure
+ */
+static int hlua_stream_ctx_prepare(struct stream *s, int state_id)
+{
+	/* In the execution wrappers linked with a stream, the
+	 * Lua context can be not initialized. This behavior
+	 * permits to save performances because a systematic
+	 * Lua initialization cause 5% performances loss.
+	 */
+ ctx_renew:
+	if (!s->hlua) {
+		struct hlua *hlua;
+
+		hlua = pool_alloc(pool_head_hlua);
+		if (!hlua)
+			return 0;
+		HLUA_INIT(hlua);
+		if (!hlua_ctx_init(hlua, state_id, s->task)) {
+			pool_free(pool_head_hlua, hlua);
+			return 0;
+		}
+		s->hlua = hlua;
+	}
+	else if (s->hlua->state_id != state_id) {
+		/* ctx already created, but not in proper state.
+		 * It should only happen after the previous execution is
+		 * finished, otherwise it's probably a bug since we don't
+		 * want to abort unfinished job..
+		 */
+		BUG_ON(HLUA_IS_RUNNING(s->hlua));
+		hlua_ctx_destroy(s->hlua);
+		s->hlua = NULL;
+		goto ctx_renew;
+	}
+	return 1;
+}
+
 /* This function is an LUA binding that register LUA function to be
  * executed after the HAProxy configuration parsing and before the
  * HAProxy scheduler starts. This function expect only one LUA
@@ -8577,11 +8689,18 @@ __LJMP static int hlua_register_init(lua_State *L)
 
 	MAY_LJMP(check_args(L, 1, "register_init"));
 
+	if (hlua_gethlua(L)) {
+		/* runtime processing */
+		WILL_LJMP(luaL_error(L, "register_init: not available outside of body context"));
+	}
+
 	ref = MAY_LJMP(hlua_checkfunction(L, 1));
 
 	init = calloc(1, sizeof(*init));
-	if (!init)
+	if (!init) {
+		hlua_unref(L, ref);
 		WILL_LJMP(luaL_error(L, "Lua out of memory error."));
+	}
 
 	init->function_ref = ref;
 	LIST_APPEND(&hlua_init_functions[hlua_state_id], &init->l);
@@ -8637,11 +8756,14 @@ static int hlua_register_task(lua_State *L)
 	task->context = hlua;
 	task->process = hlua_process_task;
 
-	if (!hlua_ctx_init(hlua, state_id, task, 1))
+	if (!hlua_ctx_init(hlua, state_id, task))
 		goto alloc_error;
 
 	/* Restore the function in the stack. */
 	lua_rawgeti(hlua->T, LUA_REGISTRYINDEX, ref);
+	/* function ref not needed anymore since it was pushed to the substack */
+	hlua_unref(L, ref);
+
 	hlua->nargs = 0;
 
 	/* Schedule task. */
@@ -8651,6 +8773,7 @@ static int hlua_register_task(lua_State *L)
 
   alloc_error:
 	task_destroy(task);
+	hlua_unref(L, ref);
 	hlua_ctx_destroy(hlua);
 	WILL_LJMP(luaL_error(L, "Lua out of memory error."));
 	return 0; /* Never reached */
@@ -8669,25 +8792,9 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 	if (!stream)
 		return 0;
 
-	/* In the execution wrappers linked with a stream, the
-	 * Lua context can be not initialized. This behavior
-	 * permits to save performances because a systematic
-	 * Lua initialization cause 5% performances loss.
-	 */
-	if (!stream->hlua) {
-		struct hlua *hlua;
-
-		hlua = pool_alloc(pool_head_hlua);
-		if (!hlua) {
-			SEND_ERR(stream->be, "Lua converter '%s': can't initialize Lua context.\n", fcn->name);
-			return 0;
-		}
-		HLUA_INIT(hlua);
-		stream->hlua = hlua;
-		if (!hlua_ctx_init(stream->hlua, fcn_ref_to_stack_id(fcn), stream->task, 0)) {
-			SEND_ERR(stream->be, "Lua converter '%s': can't initialize Lua context.\n", fcn->name);
-			return 0;
-		}
+	if (!hlua_stream_ctx_prepare(stream, fcn_ref_to_stack_id(fcn))) {
+		SEND_ERR(stream->be, "Lua converter '%s': can't initialize Lua context.\n", fcn->name);
+		return 0;
 	}
 
 	/* If it is the first run, initialize the data for the call. */
@@ -8752,6 +8859,10 @@ static int hlua_sample_conv_wrapper(const struct arg *arg_p, struct sample *smp,
 
 		/* Convert the returned value in sample. */
 		hlua_lua2smp(stream->hlua->T, -1, smp);
+		/* dup the smp before popping the related lua value and
+		 * returning it to haproxy
+		 */
+		smp_dup(smp);
 		lua_pop(stream->hlua->T, 1);
 		return 1;
 
@@ -8806,25 +8917,9 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 	if (!stream)
 		return 0;
 
-	/* In the execution wrappers linked with a stream, the
-	 * Lua context can be not initialized. This behavior
-	 * permits to save performances because a systematic
-	 * Lua initialization cause 5% performances loss.
-	 */
-	if (!stream->hlua) {
-		struct hlua *hlua;
-
-		hlua = pool_alloc(pool_head_hlua);
-		if (!hlua) {
-			SEND_ERR(stream->be, "Lua sample-fetch '%s': can't initialize Lua context.\n", fcn->name);
-			return 0;
-		}
-		hlua->T = NULL;
-		stream->hlua = hlua;
-		if (!hlua_ctx_init(stream->hlua, fcn_ref_to_stack_id(fcn), stream->task, 0)) {
-			SEND_ERR(stream->be, "Lua sample-fetch '%s': can't initialize Lua context.\n", fcn->name);
-			return 0;
-		}
+	if (!hlua_stream_ctx_prepare(stream, fcn_ref_to_stack_id(fcn))) {
+		SEND_ERR(stream->be, "Lua sample-fetch '%s': can't initialize Lua context.\n", fcn->name);
+		return 0;
 	}
 
 	/* If it is the first run, initialize the data for the call. */
@@ -8887,6 +8982,10 @@ static int hlua_sample_fetch_wrapper(const struct arg *arg_p, struct sample *smp
 
 		/* Convert the returned value in sample. */
 		hlua_lua2smp(stream->hlua->T, -1, smp);
+		/* dup the smp before popping the related lua value and
+		 * returning it to haproxy
+		 */
+		smp_dup(smp);
 		lua_pop(stream->hlua->T, 1);
 
 		/* Set the end of execution flag. */
@@ -8944,6 +9043,11 @@ __LJMP static int hlua_register_converters(lua_State *L)
 
 	MAY_LJMP(check_args(L, 2, "register_converters"));
 
+	if (hlua_gethlua(L)) {
+		/* runtime processing */
+		WILL_LJMP(luaL_error(L, "register_converters: not available outside of body context"));
+	}
+
 	/* First argument : converter name. */
 	name = MAY_LJMP(luaL_checkstring(L, 1));
 
@@ -8959,6 +9063,7 @@ __LJMP static int hlua_register_converters(lua_State *L)
 		if (fcn->function_ref[hlua_state_id] != -1) {
 			ha_warning("Trying to register converter 'lua.%s' more than once. "
 			           "This will become a hard error in version 2.5.\n", name);
+			hlua_unref(L, fcn->function_ref[hlua_state_id]);
 		}
 		fcn->function_ref[hlua_state_id] = ref;
 		return 0;
@@ -9002,6 +9107,7 @@ __LJMP static int hlua_register_converters(lua_State *L)
 
   alloc_error:
 	release_hlua_function(fcn);
+	hlua_unref(L, ref);
 	ha_free(&sck);
 	WILL_LJMP(luaL_error(L, "Lua out of memory error."));
 	return 0; /* Never reached */
@@ -9023,6 +9129,11 @@ __LJMP static int hlua_register_fetches(lua_State *L)
 
 	MAY_LJMP(check_args(L, 2, "register_fetches"));
 
+	if (hlua_gethlua(L)) {
+		/* runtime processing */
+		WILL_LJMP(luaL_error(L, "register_fetches: not available outside of body context"));
+	}
+
 	/* First argument : sample-fetch name. */
 	name = MAY_LJMP(luaL_checkstring(L, 1));
 
@@ -9038,6 +9149,7 @@ __LJMP static int hlua_register_fetches(lua_State *L)
 		if (fcn->function_ref[hlua_state_id] != -1) {
 			ha_warning("Trying to register sample-fetch 'lua.%s' more than once. "
 			           "This will become a hard error in version 2.5.\n", name);
+			hlua_unref(L, fcn->function_ref[hlua_state_id]);
 		}
 		fcn->function_ref[hlua_state_id] = ref;
 		return 0;
@@ -9082,6 +9194,7 @@ __LJMP static int hlua_register_fetches(lua_State *L)
 
   alloc_error:
 	release_hlua_function(fcn);
+	hlua_unref(L, ref);
 	ha_free(&sfk);
 	WILL_LJMP(luaL_error(L, "Lua out of memory error."));
 	return 0; /* Never reached */
@@ -9133,27 +9246,10 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 		goto end;
 	}
 
-	/* In the execution wrappers linked with a stream, the
-	 * Lua context can be not initialized. This behavior
-	 * permits to save performances because a systematic
-	 * Lua initialization cause 5% performances loss.
-	 */
-	if (!s->hlua) {
-		struct hlua *hlua;
-
-		hlua = pool_alloc(pool_head_hlua);
-		if (!hlua) {
-			SEND_ERR(px, "Lua action '%s': can't initialize Lua context.\n",
-			         rule->arg.hlua_rule->fcn->name);
-			goto end;
-		}
-		HLUA_INIT(hlua);
-		s->hlua = hlua;
-		if (!hlua_ctx_init(s->hlua, fcn_ref_to_stack_id(rule->arg.hlua_rule->fcn), s->task, 0)) {
-			SEND_ERR(px, "Lua action '%s': can't initialize Lua context.\n",
-			         rule->arg.hlua_rule->fcn->name);
-			goto end;
-		}
+	if (!hlua_stream_ctx_prepare(s, fcn_ref_to_stack_id(rule->arg.hlua_rule->fcn))) {
+		SEND_ERR(px, "Lua action '%s': can't initialize Lua context.\n",
+		         rule->arg.hlua_rule->fcn->name);
+		goto end;
 	}
 
 	/* If it is the first run, initialize the data for the call. */
@@ -9271,7 +9367,7 @@ static enum act_return hlua_action(struct act_rule *rule, struct proxy *px,
 	case HLUA_E_YIELD:
 	  err_yield:
 		act_ret = ACT_RET_CONT;
-		SEND_ERR(px, "Lua function '%s': aborting Lua processing on expired timeout.\n",
+		SEND_ERR(px, "Lua function '%s': yield not allowed.\n",
 		         rule->arg.hlua_rule->fcn->name);
 		goto end;
 
@@ -9336,7 +9432,7 @@ static int hlua_applet_tcp_init(struct appctx *ctx)
 	 * permits to save performances because a systematic
 	 * Lua initialization cause 5% performances loss.
 	 */
-	if (!hlua_ctx_init(hlua, fcn_ref_to_stack_id(ctx->rule->arg.hlua_rule->fcn), task, 0)) {
+	if (!hlua_ctx_init(hlua, fcn_ref_to_stack_id(ctx->rule->arg.hlua_rule->fcn), task)) {
 		SEND_ERR(strm->be, "Lua applet tcp '%s': can't initialize Lua context.\n",
 		         ctx->rule->arg.hlua_rule->fcn->name);
 		return -1;
@@ -9533,7 +9629,7 @@ static int hlua_applet_http_init(struct appctx *ctx)
 	 * permits to save performances because a systematic
 	 * Lua initialization cause 5% performances loss.
 	 */
-	if (!hlua_ctx_init(hlua, fcn_ref_to_stack_id(ctx->rule->arg.hlua_rule->fcn), task, 0)) {
+	if (!hlua_ctx_init(hlua, fcn_ref_to_stack_id(ctx->rule->arg.hlua_rule->fcn), task)) {
 		SEND_ERR(strm->be, "Lua applet http '%s': can't initialize Lua context.\n",
 		         ctx->rule->arg.hlua_rule->fcn->name);
 		return -1;
@@ -9880,6 +9976,11 @@ __LJMP static int hlua_register_action(lua_State *L)
 	if (lua_gettop(L) < 3 || lua_gettop(L) > 4)
 		WILL_LJMP(luaL_error(L, "'register_action' needs between 3 and 4 arguments"));
 
+	if (hlua_gethlua(L)) {
+		/* runtime processing */
+		WILL_LJMP(luaL_error(L, "register_action: not available outside of body context"));
+	}
+
 	/* First argument : converter name. */
 	name = MAY_LJMP(luaL_checkstring(L, 1));
 
@@ -9897,8 +9998,10 @@ __LJMP static int hlua_register_action(lua_State *L)
 	/* browse the second argument as an array. */
 	lua_pushnil(L);
 	while (lua_next(L, 2) != 0) {
-		if (lua_type(L, -1) != LUA_TSTRING)
+		if (lua_type(L, -1) != LUA_TSTRING) {
+			hlua_unref(L, ref);
 			WILL_LJMP(luaL_error(L, "register_action: second argument must be a table of strings"));
+		}
 
 		/* Check if action exists */
 		trash = get_trash_chunk();
@@ -9919,6 +10022,7 @@ __LJMP static int hlua_register_action(lua_State *L)
 			if (fcn->function_ref[hlua_state_id] != -1) {
 				ha_warning("Trying to register action 'lua.%s' more than once. "
 				           "This will become a hard error in version 2.5.\n", name);
+				hlua_unref(L, fcn->function_ref[hlua_state_id]);
 			}
 			fcn->function_ref[hlua_state_id] = ref;
 
@@ -9971,6 +10075,7 @@ __LJMP static int hlua_register_action(lua_State *L)
 			http_res_keywords_register(akl);
 		else {
 			release_hlua_function(fcn);
+			hlua_unref(L, ref);
 			if (akl)
 				ha_free((char **)&(akl->kw[0].kw));
 			ha_free(&akl);
@@ -9990,6 +10095,7 @@ __LJMP static int hlua_register_action(lua_State *L)
 
   alloc_error:
 	release_hlua_function(fcn);
+	hlua_unref(L, ref);
 	ha_free(&akl);
 	WILL_LJMP(luaL_error(L, "Lua out of memory error."));
 	return 0; /* Never reached */
@@ -10046,6 +10152,11 @@ __LJMP static int hlua_register_service(lua_State *L)
 
 	MAY_LJMP(check_args(L, 3, "register_service"));
 
+	if (hlua_gethlua(L)) {
+		/* runtime processing */
+		WILL_LJMP(luaL_error(L, "register_service: not available outside of body context"));
+	}
+
 	/* First argument : converter name. */
 	name = MAY_LJMP(luaL_checkstring(L, 1));
 
@@ -10064,6 +10175,7 @@ __LJMP static int hlua_register_service(lua_State *L)
 		if (fcn->function_ref[hlua_state_id] != -1) {
 			ha_warning("Trying to register service 'lua.%s' more than once. "
 			           "This will become a hard error in version 2.5.\n", name);
+			hlua_unref(L, fcn->function_ref[hlua_state_id]);
 		}
 		fcn->function_ref[hlua_state_id] = ref;
 		return 0;
@@ -10103,6 +10215,7 @@ __LJMP static int hlua_register_service(lua_State *L)
 		akl->kw[0].parse = action_register_service_http;
 	else {
 		release_hlua_function(fcn);
+		hlua_unref(L, ref);
 		if (akl)
 			ha_free((char **)&(akl->kw[0].kw));
 		ha_free(&akl);
@@ -10123,6 +10236,7 @@ __LJMP static int hlua_register_service(lua_State *L)
 
   alloc_error:
 	release_hlua_function(fcn);
+	hlua_unref(L, ref);
 	ha_free(&akl);
 	WILL_LJMP(luaL_error(L, "Lua out of memory error."));
 	return 0; /* Never reached */
@@ -10164,7 +10278,7 @@ static int hlua_cli_parse_fct(char **args, char *payload, struct appctx *appctx,
 	ctx->task->process = hlua_applet_wakeup;
 
 	/* Initialises the Lua context */
-	if (!hlua_ctx_init(hlua, fcn_ref_to_stack_id(fcn), ctx->task, 0)) {
+	if (!hlua_ctx_init(hlua, fcn_ref_to_stack_id(fcn), ctx->task)) {
 		SEND_ERR(NULL, "Lua cli '%s': can't initialize Lua context.\n", fcn->name);
 		goto error;
 	}
@@ -10323,6 +10437,11 @@ __LJMP static int hlua_register_cli(lua_State *L)
 
 	MAY_LJMP(check_args(L, 3, "register_cli"));
 
+	if (hlua_gethlua(L)) {
+		/* runtime processing */
+		WILL_LJMP(luaL_error(L, "register_cli: not available outside of body context"));
+	}
+
 	/* First argument : an array of maximum 5 keywords. */
 	if (!lua_istable(L, 1))
 		WILL_LJMP(luaL_argerror(L, 1, "1st argument must be a table"));
@@ -10339,10 +10458,14 @@ __LJMP static int hlua_register_cli(lua_State *L)
 	lua_pushnil(L);
 	memset(kw, 0, sizeof(kw));
 	while (lua_next(L, 1) != 0) {
-		if (index >= CLI_PREFIX_KW_NB)
+		if (index >= CLI_PREFIX_KW_NB) {
+			hlua_unref(L, ref_io);
 			WILL_LJMP(luaL_argerror(L, 1, "1st argument must be a table with a maximum of 5 entries"));
-		if (lua_type(L, -1) != LUA_TSTRING)
+		}
+		if (lua_type(L, -1) != LUA_TSTRING) {
+			hlua_unref(L, ref_io);
 			WILL_LJMP(luaL_argerror(L, 1, "1st argument must be a table filled with strings"));
+		}
 		kw[index] = lua_tostring(L, -1);
 		if (index == 0)
 			chunk_printf(trash, "%s", kw[index]);
@@ -10357,6 +10480,7 @@ __LJMP static int hlua_register_cli(lua_State *L)
 		if (fcn->function_ref[hlua_state_id] != -1) {
 			ha_warning("Trying to register CLI keyword 'lua.%s' more than once. "
 			           "This will become a hard error in version 2.5.\n", trash->area);
+			hlua_unref(L, fcn->function_ref[hlua_state_id]);
 		}
 		fcn->function_ref[hlua_state_id] = ref_io;
 		return 0;
@@ -10432,6 +10556,7 @@ __LJMP static int hlua_register_cli(lua_State *L)
 
   error:
 	release_hlua_function(fcn);
+	hlua_unref(L, ref_io);
 	if (cli_kws) {
 		for (i = 0; i < index; i++)
 			ha_free((char **)&(cli_kws->kw[0].str_kw[i]));
@@ -10572,29 +10697,11 @@ static int hlua_filter_new(struct stream *s, struct filter *filter)
 	struct hlua_flt_ctx *flt_ctx = NULL;
 	int ret = 1;
 
-	/* In the execution wrappers linked with a stream, the
-	 * Lua context can be not initialized. This behavior
-	 * permits to save performances because a systematic
-	 * Lua initialization cause 5% performances loss.
-	 */
-	if (!s->hlua) {
-		struct hlua *hlua;
-
-		hlua = pool_alloc(pool_head_hlua);
-		if (!hlua) {
-			SEND_ERR(s->be, "Lua filter '%s': can't initialize Lua context.\n",
-			         conf->reg->name);
-			ret = 0;
-			goto end;
-		}
-		HLUA_INIT(hlua);
-		s->hlua = hlua;
-		if (!hlua_ctx_init(s->hlua, reg_flt_to_stack_id(conf->reg), s->task, 0)) {
-			SEND_ERR(s->be, "Lua filter '%s': can't initialize Lua context.\n",
-			         conf->reg->name);
-			ret = 0;
-			goto end;
-		}
+	if (!hlua_stream_ctx_prepare(s, reg_flt_to_stack_id(conf->reg))) {
+		SEND_ERR(s->be, "Lua filter '%s': can't initialize filter Lua context.\n",
+			 conf->reg->name);
+		ret = 0;
+		goto end;
 	}
 
 	flt_ctx = pool_zalloc(pool_head_hlua_flt_ctx);
@@ -10614,8 +10721,8 @@ static int hlua_filter_new(struct stream *s, struct filter *filter)
 	}
 	HLUA_INIT(flt_ctx->hlua[0]);
 	HLUA_INIT(flt_ctx->hlua[1]);
-	if (!hlua_ctx_init(flt_ctx->hlua[0], reg_flt_to_stack_id(conf->reg), s->task, 0) ||
-	    !hlua_ctx_init(flt_ctx->hlua[1], reg_flt_to_stack_id(conf->reg), s->task, 0)) {
+	if (!hlua_ctx_init(flt_ctx->hlua[0], reg_flt_to_stack_id(conf->reg), s->task) ||
+	    !hlua_ctx_init(flt_ctx->hlua[1], reg_flt_to_stack_id(conf->reg), s->task)) {
 		SEND_ERR(s->be, "Lua filter '%s': can't initialize filter Lua context.\n",
 			 conf->reg->name);
 		ret = 0;
@@ -11140,6 +11247,11 @@ __LJMP static int hlua_register_filter(lua_State *L)
 
 	MAY_LJMP(check_args(L, 3, "register_filter"));
 
+	if (hlua_gethlua(L)) {
+		/* runtime processing */
+		WILL_LJMP(luaL_error(L, "register_filter: not available outside of body context"));
+	}
+
 	/* First argument : filter name. */
 	name = MAY_LJMP(luaL_checkstring(L, 1));
 
@@ -11157,6 +11269,10 @@ __LJMP static int hlua_register_filter(lua_State *L)
 		if (reg_flt->flt_ref[hlua_state_id] != -1 ||  reg_flt->fun_ref[hlua_state_id] != -1) {
 			ha_warning("Trying to register filter 'lua.%s' more than once. "
 				   "This will become a hard error in version 2.5.\n", name);
+			if (reg_flt->flt_ref[hlua_state_id] != -1)
+				hlua_unref(L, reg_flt->flt_ref[hlua_state_id]);
+			if (reg_flt->fun_ref[hlua_state_id] != -1)
+				hlua_unref(L, reg_flt->fun_ref[hlua_state_id]);
 		}
 		reg_flt->flt_ref[hlua_state_id] = flt_ref;
 		reg_flt->fun_ref[hlua_state_id] = fun_ref;
@@ -11194,6 +11310,8 @@ __LJMP static int hlua_register_filter(lua_State *L)
 
   alloc_error:
 	release_hlua_reg_filter(reg_flt);
+	hlua_unref(L, flt_ref);
+	hlua_unref(L, fun_ref);
 	ha_free(&fkl);
 	WILL_LJMP(luaL_error(L, "Lua out of memory error."));
 	return 0; /* Never reached */
@@ -11739,11 +11857,15 @@ int hlua_post_init_state(lua_State *L)
 
 	list_for_each_entry(init, &hlua_init_functions[hlua_state_id], l) {
 		lua_rawgeti(L, LUA_REGISTRYINDEX, init->function_ref);
+		/* function ref should be released right away since it was pushed
+		 * on the stack and will not be used anymore
+		 */
+		hlua_unref(L, init->function_ref);
 
 #if defined(LUA_VERSION_NUM) && LUA_VERSION_NUM >= 504
-		ret = lua_resume(L, L, 0, &nres);
+		ret = lua_resume(L, NULL, 0, &nres);
 #else
-		ret = lua_resume(L, L, 0);
+		ret = lua_resume(L, NULL, 0);
 #endif
 		kind = NULL;
 		switch (ret) {
@@ -11760,7 +11882,6 @@ int hlua_post_init_state(lua_State *L)
 				kind = "runtime error";
 			msg = lua_tostring(L, -1);
 			lua_settop(L, 0); /* Empty the stack. */
-			lua_pop(L, 1);
 			trace = hlua_traceback(L, ", ");
 			if (msg)
 				ha_alert("Lua init: %s: '%s' from %s\n", kind, msg, trace);
@@ -11781,8 +11902,7 @@ int hlua_post_init_state(lua_State *L)
 		case LUA_ERRMEM:
 			if (!kind)
 				kind = "out of memory error";
-			lua_settop(L, 0);
-			lua_pop(L, 1);
+			lua_settop(L, 0); /* Empty the stack. */
 			trace = hlua_traceback(L, ", ");
 			ha_alert("Lua init: %s: %s\n", kind, trace);
 			return_status = 0;
@@ -11999,6 +12119,13 @@ lua_State *hlua_init_state(int thread_num)
 
 	/* Init main lua stack. */
 	L = lua_newstate(hlua_alloc, &hlua_global_allocator);
+
+	if (!L) {
+		fprintf(stderr,
+		        "Lua init: critical error: lua_newstate() returned NULL."
+		        " This may possibly be caused by a memory allocation error.\n");
+		exit(1);
+	}
 
 	/* Initialise Lua context to NULL */
 	context = lua_getextraspace(L);

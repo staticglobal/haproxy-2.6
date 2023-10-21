@@ -513,6 +513,10 @@ static int quic_build_stream_frame(unsigned char **buf, const unsigned char *end
 	     (!quic_enc_int(buf, end, stream->len) || end - *buf < stream->len)))
 		return 0;
 
+	/* No need for data memcpy if no payload. */
+	if (!stream->len)
+		return 1;
+
 	wrap = (const unsigned char *)b_wrap(stream->buf);
 	if (stream->data + stream->len > wrap) {
 		size_t to_copy = wrap - stream->data;
@@ -1165,4 +1169,3 @@ int qc_build_frm(unsigned char **buf, const unsigned char *end,
 	TRACE_LEAVE(QUIC_EV_CONN_BFRM, qc);
 	return ret;
 }
-

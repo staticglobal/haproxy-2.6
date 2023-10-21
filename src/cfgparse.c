@@ -71,6 +71,7 @@
 #include <haproxy/namespace.h>
 #include <haproxy/quic_sock.h>
 #include <haproxy/obj_type-t.h>
+#include <haproxy/openssl-compat.h>
 #include <haproxy/peers-t.h>
 #include <haproxy/peers.h>
 #include <haproxy/pool.h>
@@ -977,17 +978,6 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 			goto out;
 		}
 
-		other = stktable_find_by_name(args[1]);
-		if (other) {
-			ha_alert("parsing [%s:%d] : stick-table name '%s' conflicts with table declared in %s '%s' at %s:%d.\n",
-				 file, linenum, args[1],
-				 other->proxy ? proxy_cap_str(other->proxy->cap) : "peers",
-				 other->proxy ? other->id : other->peers.p->id,
-				 other->conf.file, other->conf.line);
-			err_code |= ERR_ALERT | ERR_FATAL;
-			goto out;
-		}
-
 		/* Build the stick-table name, concatenating the "peers" section name
 		 * followed by a '/' character and the table name argument.
 		 */
@@ -1017,6 +1007,18 @@ int cfg_parse_peers(const char *file, int linenum, char **args, int kwm)
 			err_code |= ERR_ALERT | ERR_FATAL;
 			goto out;
 		}
+
+		other = stktable_find_by_name(trash.area);
+		if (other) {
+			ha_alert("parsing [%s:%d] : stick-table name '%s' conflicts with table declared in %s '%s' at %s:%d.\n",
+			         file, linenum, args[1],
+			         other->proxy ? proxy_cap_str(other->proxy->cap) : "peers",
+			         other->proxy ? other->id : other->peers.p->id,
+			         other->conf.file, other->conf.line);
+			err_code |= ERR_ALERT | ERR_FATAL;
+			goto out;
+		}
+
 
 		err_code |= parse_stick_table(file, linenum, args, t, id, id + prefix_len, curpeers);
 		if (err_code & ERR_FATAL) {
@@ -2402,6 +2404,9 @@ static int numa_detect_topology()
 	BUG_ON(ndomains > MAXMEMDOM);
 	ha_cpuset_zero(&node_cpu_set);
 
+	if (ndomains < 2)
+		goto leave;
+
 	/*
 	 * We retrieve the first active valid CPU domain
 	 * with active cpu and binding it, we returns
@@ -2427,7 +2432,7 @@ static int numa_detect_topology()
 		}
 		break;
 	}
-
+ leave:
 	return ha_cpuset_count(&node_cpu_set);
 }
 
@@ -2463,15 +2468,11 @@ int check_config_validity()
 	struct cfg_postparser *postparser;
 	struct resolvers *curr_resolvers = NULL;
 	int i;
-	int diag_no_cluster_secret = 0;
 
 	bind_conf = NULL;
 	/*
 	 * Now, check for the integrity of all that we have collected.
 	 */
-
-	/* will be needed further to delay some tasks */
-	clock_update_date(0,1);
 
 	if (!global.tune.max_http_hdr)
 		global.tune.max_http_hdr = MAX_HTTP_HDR;
@@ -4015,14 +4016,6 @@ init_proxies_list_stage2:
 #ifdef USE_QUIC
 			/* override the accept callback for QUIC listeners. */
 			if (listener->flags & LI_F_QUIC_LISTENER) {
-				if (!global.cluster_secret) {
-					diag_no_cluster_secret = 1;
-					if (listener->bind_conf->options & BC_O_QUIC_FORCE_RETRY) {
-						ha_alert("QUIC listener with quic-force-retry requires global cluster-secret to be set.\n");
-						cfgerr++;
-					}
-				}
-
 				li_init_per_thr(listener);
 			}
 #endif
@@ -4071,12 +4064,6 @@ init_proxies_list_stage2:
 		/* check if list is not null to avoid infinite loop */
 		if (init_proxies_list)
 			goto init_proxies_list_stage2;
-	}
-
-	if (diag_no_cluster_secret) {
-		ha_diag_warning("Generating a random cluster secret. "
-		                "You should define your own one in the configuration to ensure consistency "
-		                "after reload/restart or across your whole cluster.\n");
 	}
 
 	/*

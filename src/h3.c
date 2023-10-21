@@ -401,6 +401,8 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 	struct ist scheme = IST_NULL, authority = IST_NULL;
 	int hdr_idx, ret;
 	int cookie = -1, last_cookie = -1, i;
+	const char *ctl;
+	int relaxed = !!(h3c->qcc->proxy->options2 & PR_O2_REQBUG_OK);
 
 	/* RFC 9114 4.1.2. Malformed Requests and Responses
 	 *
@@ -437,7 +439,12 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 		goto out;
 	}
 
-	qc_get_buf(qcs, &htx_buf);
+	if (!qc_get_buf(qcs, &htx_buf)) {
+		TRACE_ERROR("HTX buffer alloc failure", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+		h3c->err = H3_INTERNAL_ERROR;
+		len = -1;
+		goto out;
+	}
 	BUG_ON(!b_size(&htx_buf)); /* TODO */
 	htx = htx_from_buf(&htx_buf);
 
@@ -459,6 +466,24 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 		if (!istmatch(list[hdr_idx].n, ist(":")))
 			break;
 
+		/* RFC 9114 10.3 Intermediary-Encapsulation Attacks
+		 *
+		 * While most values that can be encoded will not alter field
+		 * parsing, carriage return (ASCII 0x0d), line feed (ASCII 0x0a),
+		 * and the null character (ASCII 0x00) might be exploited by an
+		 * attacker if they are translated verbatim. Any request or
+		 * response that contains a character not permitted in a field
+		 * value MUST be treated as malformed
+		 */
+
+		/* look for forbidden control characters in the pseudo-header value */
+		ctl = ist_find_ctl(list[hdr_idx].v);
+		if (unlikely(ctl) && http_header_has_forbidden_char(list[hdr_idx].v, ctl)) {
+			TRACE_ERROR("control character present in pseudo-header value", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+			len = -1;
+			goto out;
+		}
+
 		/* pseudo-header. Malformed name with uppercase character or
 		 * invalid token will be rejected in the else clause.
 		 */
@@ -476,6 +501,19 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 				len = -1;
 				goto out;
 			}
+
+			if (!relaxed) {
+				/* we need to reject any control chars or '#' from the path,
+				 * unless option accept-invalid-http-request is set.
+				 */
+				ctl = ist_find_range(list[hdr_idx].v, 0, '#');
+				if (unlikely(ctl) && http_path_has_forbidden_char(list[hdr_idx].v, ctl)) {
+					TRACE_ERROR("forbidden character in ':path' pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+					len = -1;
+					goto out;
+				}
+			}
+
 			path = list[hdr_idx].v;
 		}
 		else if (isteq(list[hdr_idx].n, ist(":scheme"))) {
@@ -556,6 +594,25 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 			}
 		}
 
+
+		/* RFC 9114 10.3 Intermediary-Encapsulation Attacks
+		 *
+		 * While most values that can be encoded will not alter field
+		 * parsing, carriage return (ASCII 0x0d), line feed (ASCII 0x0a),
+		 * and the null character (ASCII 0x00) might be exploited by an
+		 * attacker if they are translated verbatim. Any request or
+		 * response that contains a character not permitted in a field
+		 * value MUST be treated as malformed
+		 */
+
+		/* look for forbidden control characters in the header value */
+		ctl = ist_find_ctl(list[hdr_idx].v);
+		if (unlikely(ctl) && http_header_has_forbidden_char(list[hdr_idx].v, ctl)) {
+			TRACE_ERROR("control character present in header value", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+			len = -1;
+			goto out;
+		}
+
 		if (isteq(list[hdr_idx].n, ist("cookie"))) {
 			http_cookie_register(list, hdr_idx, &cookie, &last_cookie);
 			++hdr_idx;
@@ -577,6 +634,7 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 			}
 
 			h3s->flags |= H3_SF_HAVE_CLEN;
+			sl->flags |= HTX_SL_F_CLEN;
 			/* This will fail if current frame is the last one and
 			 * content-length is not null.
 			 */
@@ -634,7 +692,7 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 	htx_to_buf(htx, &htx_buf);
 	htx = NULL;
 
-	if (!qc_attach_sc(qcs, &htx_buf)) {
+	if (!qc_attach_sc(qcs, &htx_buf, fin)) {
 		h3c->err = H3_INTERNAL_ERROR;
 		len = -1;
 		goto out;
@@ -679,6 +737,8 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 static ssize_t h3_data_to_htx(struct qcs *qcs, const struct buffer *buf,
                               uint64_t len, char fin)
 {
+	struct h3s *h3s = qcs->ctx;
+	struct h3c *h3c = h3s->h3c;
 	struct buffer *appbuf;
 	struct htx *htx = NULL;
 	size_t htx_sent = 0;
@@ -687,8 +747,13 @@ static ssize_t h3_data_to_htx(struct qcs *qcs, const struct buffer *buf,
 
 	TRACE_ENTER(H3_EV_RX_FRAME|H3_EV_RX_DATA, qcs->qcc->conn, qcs);
 
-	appbuf = qc_get_buf(qcs, &qcs->rx.app_buf);
-	BUG_ON(!appbuf);
+	if (!(appbuf = qc_get_buf(qcs, &qcs->rx.app_buf))) {
+		TRACE_ERROR("data buffer alloc failure", H3_EV_RX_FRAME|H3_EV_RX_DATA, qcs->qcc->conn, qcs);
+		h3c->err = H3_INTERNAL_ERROR;
+		len = -1;
+		goto out;
+	}
+
 	htx = htx_from_buf(appbuf);
 
 	if (len > b_data(buf)) {
@@ -732,7 +797,8 @@ static ssize_t h3_data_to_htx(struct qcs *qcs, const struct buffer *buf,
 		htx->flags |= HTX_FL_EOM;
 
  out:
-	htx_to_buf(htx, appbuf);
+	if (appbuf)
+		htx_to_buf(htx, appbuf);
 
 	TRACE_LEAVE(H3_EV_RX_FRAME|H3_EV_RX_DATA, qcs->qcc->conn, qcs);
 	return htx_sent;
@@ -888,7 +954,7 @@ static ssize_t h3_decode_qcs(struct qcs *qcs, struct buffer *b, int fin)
 			/* Check that content-length is not exceeded on a new DATA frame. */
 			if (ftype == H3_FT_DATA) {
 				h3s->data_len += flen;
-				if (h3s->flags & H3_SF_HAVE_CLEN && h3_check_body_size(qcs, fin)) {
+				if (h3s->flags & H3_SF_HAVE_CLEN && h3_check_body_size(qcs, (fin && flen == b_data(b)))) {
 					qcc_emit_cc_app(qcs->qcc, h3c->err, 1);
 					return -1;
 				}
@@ -923,13 +989,13 @@ static ssize_t h3_decode_qcs(struct qcs *qcs, struct buffer *b, int fin)
 			break;
 		}
 
+		last_stream_frame = (fin && flen == b_data(b));
+
 		/* Check content-length equality with DATA frames length on the last frame. */
-		if (fin && h3s->flags & H3_SF_HAVE_CLEN && h3_check_body_size(qcs, fin)) {
+		if (last_stream_frame && h3s->flags & H3_SF_HAVE_CLEN && h3_check_body_size(qcs, last_stream_frame)) {
 			qcc_emit_cc_app(qcs->qcc, h3c->err, 1);
 			return -1;
 		}
-
-		last_stream_frame = (fin && flen == b_data(b));
 
 		h3_inc_frame_type_cnt(h3c->prx_counters, ftype);
 		switch (ftype) {
