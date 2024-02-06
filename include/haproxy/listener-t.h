@@ -121,6 +121,7 @@ enum li_status {
 #define BC_O_USE_SOCK_STREAM    0x00000010 /* at least one stream-type listener is used */
 #define BC_O_USE_XPRT_DGRAM     0x00000020 /* at least one dgram-only xprt listener is used */
 #define BC_O_USE_XPRT_STREAM    0x00000040 /* at least one stream-only xprt listener is used */
+#define BC_O_XPRT_MAXCONN       0x00010000 /* transport layer allocates its own resource prior to accept and is responsible to check maxconn limit */
 
 
 /* flags used with bind_conf->ssl_options */

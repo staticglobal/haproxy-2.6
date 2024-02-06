@@ -294,7 +294,6 @@ static inline size_t h3_decode_frm_header(uint64_t *ftype, uint64_t *flen,
 static int h3_is_frame_valid(struct h3c *h3c, struct qcs *qcs, uint64_t ftype)
 {
 	struct h3s *h3s = qcs->ctx;
-	const uint64_t id = qcs->id;
 
 	BUG_ON_HOT(h3s->type == H3S_T_UNKNOWN);
 
@@ -326,8 +325,14 @@ static int h3_is_frame_valid(struct h3c *h3c, struct qcs *qcs, uint64_t ftype)
 		       !(h3c->flags & H3_CF_SETTINGS_RECV);
 
 	case H3_FT_PUSH_PROMISE:
-		return h3s->type != H3S_T_CTRL &&
-		       (id & QCS_ID_SRV_INTIATOR_BIT);
+		/* RFC 9114 7.2.5. PUSH_PROMISE
+		 * A client MUST NOT send a PUSH_PROMISE frame. A server MUST treat the
+		 * receipt of a PUSH_PROMISE frame as a connection error of type
+		 * H3_FRAME_UNEXPECTED.
+		 */
+
+		/* TODO server-side only. */
+		return 0;
 
 	default:
 		/* draft-ietf-quic-http34 9. Extensions to HTTP/3
@@ -378,6 +383,39 @@ static int h3_check_body_size(struct qcs *qcs, int fin)
 
 	TRACE_LEAVE(H3_EV_RX_FRAME, qcs->qcc->conn, qcs);
 	return ret;
+}
+
+/* Set <auth> authority header to the new value <value> for <qcs> stream. This
+ * ensures that value is conformant to the specification. If <auth> is a
+ * non-null length string, it ensures that <value> is identical to it.
+ *
+ * Returns 0 on success else non-zero.
+ */
+static int h3_set_authority(struct qcs *qcs, struct ist *auth, const struct ist value)
+{
+	/* RFC 9114 4.3.1. Request Pseudo-Header Fields
+	 *
+	 * If the :scheme pseudo-header field identifies a scheme that has a
+	 * mandatory authority component (including "http" and "https"), the
+	 * request MUST contain either an :authority pseudo-header field or a
+	 * Host header field. If these fields are present, they MUST NOT be
+	 * empty. If both fields are present, they MUST contain the same value.
+	 */
+
+	/* Check that if a previous value is set the new value is identical. */
+	if (isttest(*auth) && !isteq(*auth, value)) {
+		TRACE_ERROR("difference between :authority and host headers", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+		return 1;
+	}
+
+	/* Check that value is not empty. */
+	if (!istlen(value)) {
+		TRACE_ERROR("empty :authority/host header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+		return 1;
+	}
+
+	*auth = value;
+	return 0;
 }
 
 /* Parse from buffer <buf> a H3 HEADERS frame of length <len>. Data are copied
@@ -531,7 +569,12 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 				len = -1;
 				goto out;
 			}
-			authority = list[hdr_idx].v;
+
+			if (h3_set_authority(qcs, &authority, list[hdr_idx].v)) {
+				h3c->err = H3_MESSAGE_ERROR;
+				len = -1;
+				goto out;
+			}
 		}
 		else {
 			TRACE_ERROR("unknown pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
@@ -613,7 +656,14 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 			goto out;
 		}
 
-		if (isteq(list[hdr_idx].n, ist("cookie"))) {
+		if (isteq(list[hdr_idx].n, ist("host"))) {
+			if (h3_set_authority(qcs, &authority, list[hdr_idx].v)) {
+				h3c->err = H3_MESSAGE_ERROR;
+				len = -1;
+				goto out;
+			}
+		}
+		else if (isteq(list[hdr_idx].n, ist("cookie"))) {
 			http_cookie_register(list, hdr_idx, &cookie, &last_cookie);
 			++hdr_idx;
 			continue;
@@ -675,6 +725,20 @@ static ssize_t h3_headers_to_htx(struct qcs *qcs, const struct buffer *buf,
 
 		htx_add_header(htx, list[hdr_idx].n, list[hdr_idx].v);
 		++hdr_idx;
+	}
+
+	/* RFC 9114 4.3.1. Request Pseudo-Header Fields
+	 *
+	 * If the :scheme pseudo-header field identifies a scheme that has a
+	 * mandatory authority component (including "http" and "https"), the
+	 * request MUST contain either an :authority pseudo-header field or a
+	 * Host header field.
+	 */
+	if (!isttest(authority)) {
+		TRACE_ERROR("missing mandatory pseudo-header", H3_EV_RX_FRAME|H3_EV_RX_HDR, qcs->qcc->conn, qcs);
+		h3c->err = H3_MESSAGE_ERROR;
+		len = -1;
+		goto out;
 	}
 
 	if (cookie >= 0) {
@@ -1070,7 +1134,11 @@ static struct buffer *mux_get_buf(struct qcs *qcs)
 	return &qcs->tx.buf;
 }
 
-/* Function used to emit stream data from <qcs> control uni-stream */
+/* Function used to emit stream data from <qcs> control uni-stream.
+ *
+ * On success return the number of sent bytes. A negative code is used on
+ * error.
+ */
 static int h3_control_send(struct qcs *qcs, void *ctx)
 {
 	int ret;
@@ -1109,6 +1177,11 @@ static int h3_control_send(struct qcs *qcs, void *ctx)
 	}
 
 	res = mux_get_buf(qcs);
+	if (!res) {
+		TRACE_ERROR("cannot allocate Tx buffer", H3_EV_TX_SETTINGS, qcs->qcc->conn, qcs);
+		goto err;
+	}
+
 	if (b_room(res) < b_data(&pos)) {
 		// TODO the mux should be put in blocked state, with
 		// the stream in state waiting for settings to be sent
@@ -1121,10 +1194,16 @@ static int h3_control_send(struct qcs *qcs, void *ctx)
 
 	TRACE_LEAVE(H3_EV_TX_SETTINGS, qcs->qcc->conn, qcs);
 	return ret;
+
+ err:
+	TRACE_DEVEL("leaving on error", H3_EV_TX_SETTINGS, qcs->qcc->conn, qcs);
+	return -1;
 }
 
 static int h3_resp_headers_send(struct qcs *qcs, struct htx *htx)
 {
+	struct h3s *h3s = qcs->ctx;
+	struct h3c *h3c = h3s->h3c;
 	struct buffer outbuf;
 	struct buffer headers_buf = BUF_NULL;
 	struct buffer *res;
@@ -1158,8 +1237,11 @@ static int h3_resp_headers_send(struct qcs *qcs, struct htx *htx)
 			status = sl->info.res.status;
 		}
 		else if (type == HTX_BLK_HDR) {
-			if (unlikely(hdr >= sizeof(list) / sizeof(list[0]) - 1))
+			if (unlikely(hdr >= sizeof(list) / sizeof(list[0]) - 1)) {
+				TRACE_ERROR("too many headers", H3_EV_TX_HDR, qcs->qcc->conn, qcs);
+				h3c->err = H3_INTERNAL_ERROR;
 				goto err;
+			}
 			list[hdr].n = htx_get_blk_name(htx, blk);
 			list[hdr].v = htx_get_blk_value(htx, blk);
 			hdr++;
@@ -1175,6 +1257,11 @@ static int h3_resp_headers_send(struct qcs *qcs, struct htx *htx)
 	list[hdr].n = ist("");
 
 	res = mux_get_buf(qcs);
+	if (!res) {
+		TRACE_ERROR("cannot allocate Tx buffer", H3_EV_TX_HDR, qcs->qcc->conn, qcs);
+		h3c->err = H3_INTERNAL_ERROR;
+		goto err;
+	}
 
 	/* At least 5 bytes to store frame type + length as a varint max size */
 	if (b_room(res) < 5)
@@ -1246,12 +1333,13 @@ static int h3_resp_headers_send(struct qcs *qcs, struct htx *htx)
 
  err:
 	TRACE_DEVEL("leaving on error", H3_EV_TX_HDR, qcs->qcc->conn, qcs);
-	return 0;
+	return -1;
 }
 
-/* Returns the total of bytes sent. */
 static int h3_resp_data_send(struct qcs *qcs, struct htx *htx, size_t count)
 {
+	struct h3s *h3s = qcs->ctx;
+	struct h3c *h3c = h3s->h3c;
 	struct buffer outbuf;
 	struct buffer *res;
 	size_t total = 0;
@@ -1273,6 +1361,11 @@ static int h3_resp_data_send(struct qcs *qcs, struct htx *htx, size_t count)
 		goto end;
 
 	res = mux_get_buf(qcs);
+	if (!res) {
+		TRACE_ERROR("cannot allocate Tx buffer", H3_EV_TX_DATA, qcs->qcc->conn, qcs);
+		h3c->err = H3_INTERNAL_ERROR;
+		goto err;
+	}
 
 	if (fsize > count)
 		fsize = count;
@@ -1293,6 +1386,7 @@ static int h3_resp_data_send(struct qcs *qcs, struct htx *htx, size_t count)
 	 * on SEND.
 	 */
 	if (b_size(&outbuf) <= hsize) {
+		TRACE_STATE("not enough room for data frame", H3_EV_TX_DATA, qcs->qcc->conn, qcs);
 		qcs->flags |= QC_SF_BLK_MROOM;
 		goto end;
 	}
@@ -1320,20 +1414,28 @@ static int h3_resp_data_send(struct qcs *qcs, struct htx *htx, size_t count)
  end:
 	TRACE_LEAVE(H3_EV_TX_DATA, qcs->qcc->conn, qcs);
 	return total;
+
+ err:
+	BUG_ON(total); /* Must return HTX removed size if at least on frame encoded. */
+	TRACE_DEVEL("leaving on error", H3_EV_TX_DATA, qcs->qcc->conn, qcs);
+	return -1;
 }
 
 static size_t h3_snd_buf(struct qcs *qcs, struct htx *htx, size_t count)
 {
+	struct h3s *h3s = qcs->ctx;
+	struct h3c *h3c = h3s->h3c;
 	size_t total = 0;
 	enum htx_blk_type btype;
 	struct htx_blk *blk;
 	uint32_t bsize;
 	int32_t idx;
-	int ret;
+	int ret = 0;
 
 	h3_debug_printf(stderr, "%s\n", __func__);
 
-	while (count && !htx_is_empty(htx) && !(qcs->flags & QC_SF_BLK_MROOM)) {
+	while (count && !htx_is_empty(htx) &&
+	       !(qcs->flags & QC_SF_BLK_MROOM) && !h3c->err) {
 		idx = htx_get_head(htx);
 		blk = htx_get_blk(htx, idx);
 		btype = htx_get_blk_type(blk);
@@ -1374,6 +1476,17 @@ static size_t h3_snd_buf(struct qcs *qcs, struct htx *htx, size_t count)
 			count -= bsize;
 			break;
 		}
+
+		/* If an error occured, either buffer space or connection error
+		 * must be set to break current loop.
+		 */
+		BUG_ON(ret < 0 && !(qcs->flags & QC_SF_BLK_MROOM) && !h3c->err);
+	}
+
+	/* Interrupt sending on connection error. */
+	if (unlikely(h3c->err)) {
+		qcc_emit_cc_app(qcs->qcc, h3c->err, 1);
+		goto out;
 	}
 
  out:
@@ -1468,8 +1581,10 @@ static int h3_finalize(void *ctx)
 	if (!qcs)
 		return 0;
 
-	h3_control_send(qcs, h3c);
 	h3c->ctrl_strm = qcs;
+
+	if (h3_control_send(qcs, h3c) < 0)
+		return 0;
 
 	return 1;
 }
@@ -1519,7 +1634,7 @@ static int h3_init(struct qcc *qcc)
 
 	h3c->qcc = qcc;
 	h3c->ctrl_strm = NULL;
-	h3c->err = H3_NO_ERROR;
+	h3c->err = 0;
 	h3c->flags = 0;
 	h3c->id_goaway = 0;
 

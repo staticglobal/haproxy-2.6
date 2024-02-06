@@ -612,7 +612,7 @@ static int ssl_bind_parse_ca_file_common(char **args, int cur_arg, char **ca_fil
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	if ((*args[cur_arg + 1] != '/') && global_ssl.ca_base)
+	if ((*args[cur_arg + 1] != '/') && (*args[cur_arg + 1] != '@') && global_ssl.ca_base)
 		memprintf(ca_file_p, "%s/%s", global_ssl.ca_base, args[cur_arg + 1]);
 	else
 		memprintf(ca_file_p, "%s", args[cur_arg + 1]);
@@ -652,7 +652,7 @@ static int bind_parse_ca_sign_file(char **args, int cur_arg, struct proxy *px, s
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	if ((*args[cur_arg + 1] != '/') && global_ssl.ca_base)
+	if ((*args[cur_arg + 1] != '/') && (*args[cur_arg + 1] != '@') && global_ssl.ca_base)
 		memprintf(&conf->ca_sign_file, "%s/%s", global_ssl.ca_base, args[cur_arg + 1]);
 	else
 		memprintf(&conf->ca_sign_file, "%s", args[cur_arg + 1]);
@@ -758,7 +758,7 @@ static int ssl_bind_parse_crl_file(char **args, int cur_arg, struct proxy *px, s
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	if ((*args[cur_arg + 1] != '/') && global_ssl.ca_base)
+	if ((*args[cur_arg + 1] != '/') && (*args[cur_arg + 1] != '@') && global_ssl.ca_base)
 		memprintf(&conf->crl_file, "%s/%s", global_ssl.ca_base, args[cur_arg + 1]);
 	else
 		memprintf(&conf->crl_file, "%s", args[cur_arg + 1]);
@@ -1421,7 +1421,7 @@ static int srv_parse_ca_file(char **args, int *cur_arg, struct proxy *px, struct
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	if ((*args[*cur_arg + 1] != '/') && global_ssl.ca_base)
+	if ((*args[*cur_arg + 1] != '/') && (*args[*cur_arg + 1] != '@') && global_ssl.ca_base)
 		memprintf(&newsrv->ssl_ctx.ca_file, "%s/%s", global_ssl.ca_base, args[*cur_arg + 1]);
 	else
 		memprintf(&newsrv->ssl_ctx.ca_file, "%s", args[*cur_arg + 1]);
@@ -1541,7 +1541,7 @@ static int srv_parse_crl_file(char **args, int *cur_arg, struct proxy *px, struc
 		return ERR_ALERT | ERR_FATAL;
 	}
 
-	if ((*args[*cur_arg + 1] != '/') && global_ssl.ca_base)
+	if ((*args[*cur_arg + 1] != '/') && (*args[*cur_arg + 1] != '@') && global_ssl.ca_base)
 		memprintf(&newsrv->ssl_ctx.crl_file, "%s/%s", global_ssl.ca_base, args[*cur_arg + 1]);
 	else
 		memprintf(&newsrv->ssl_ctx.crl_file, "%s", args[*cur_arg + 1]);

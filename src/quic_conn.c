@@ -37,6 +37,7 @@
 #include <haproxy/connection.h>
 #include <haproxy/fd.h>
 #include <haproxy/freq_ctr.h>
+#include <haproxy/frontend.h>
 #include <haproxy/global.h>
 #include <haproxy/h3.h>
 #include <haproxy/hq_interop.h>
@@ -219,6 +220,7 @@ static struct quic_tx_packet *qc_build_pkt(unsigned char **pos, const unsigned c
                                            struct list *frms, struct quic_conn *qc,
                                            const struct quic_version *ver, size_t dglen, int pkt_type,
                                            int must_ack, int padding, int probe, int cc, int *err);
+static void qc_purge_tx_buf(struct quic_conn *qc, struct buffer *buf);
 struct task *quic_conn_app_io_cb(struct task *t, void *context, unsigned int state);
 static void qc_idle_timer_do_rearm(struct quic_conn *qc);
 static void qc_idle_timer_rearm(struct quic_conn *qc, int read);
@@ -750,6 +752,7 @@ void qc_kill_conn(struct quic_conn *qc)
 	TRACE_ENTER(QUIC_EV_CONN_KILL, qc);
 	TRACE_PROTO("killing the connection", QUIC_EV_CONN_KILL, qc);
 	qc->flags |= QUIC_FL_CONN_TO_KILL;
+	qc->flags &= ~QUIC_FL_CONN_RETRANS_NEEDED;
 	task_wakeup(qc->idle_timer_task, TASK_WOKEN_OTHER);
 	TRACE_LEAVE(QUIC_EV_CONN_KILL, qc);
 }
@@ -971,14 +974,16 @@ int ha_quic_set_encryption_secrets(SSL *ssl, enum ssl_encryption_level_t level,
 		goto write;
 
 	rx = &tls_ctx->rx;
+	rx->aead = tls_aead(cipher);
+	rx->md   = tls_md(cipher);
+	rx->hp   = tls_hp(cipher);
+	if (!rx->aead || !rx->md || !rx->hp)
+		goto leave;
+
 	if (!quic_tls_secrets_keys_alloc(rx)) {
 		TRACE_ERROR("RX keys allocation failed", QUIC_EV_CONN_RWSEC, qc);
 		goto leave;
 	}
-
-	rx->aead = tls_aead(cipher);
-	rx->md   = tls_md(cipher);
-	rx->hp   = tls_hp(cipher);
 
 	if (!quic_tls_derive_keys(rx->aead, rx->hp, rx->md, ver, rx->key, rx->keylen,
 	                          rx->iv, rx->ivlen, rx->hp_key, sizeof rx->hp_key,
@@ -1012,14 +1017,16 @@ write:
 		goto keyupdate_init;
 
 	tx = &tls_ctx->tx;
+	tx->aead = tls_aead(cipher);
+	tx->md   = tls_md(cipher);
+	tx->hp   = tls_hp(cipher);
+	if (!tx->aead || !tx->md || !tx->hp)
+		goto leave;
+
 	if (!quic_tls_secrets_keys_alloc(tx)) {
 		TRACE_ERROR("TX keys allocation failed", QUIC_EV_CONN_RWSEC, qc);
 		goto leave;
 	}
-
-	tx->aead = tls_aead(cipher);
-	tx->md   = tls_md(cipher);
-	tx->hp   = tls_hp(cipher);
 
 	if (!quic_tls_derive_keys(tx->aead, tx->hp, tx->md, ver, tx->key, tx->keylen,
 	                          tx->iv, tx->ivlen, tx->hp_key, sizeof tx->hp_key,
@@ -1088,6 +1095,16 @@ write:
  out:
 	ret = 1;
  leave:
+	if (!ret) {
+		/* Release the CRYPTO frames which have been provided by the TLS stack
+		 * to prevent the transmission of ack-eliciting packets.
+		 */
+		qc_release_pktns_frms(qc, qc->els[QUIC_TLS_ENC_LEVEL_INITIAL].pktns);
+		qc_release_pktns_frms(qc, qc->els[QUIC_TLS_ENC_LEVEL_HANDSHAKE].pktns);
+		qc_release_pktns_frms(qc, qc->els[QUIC_TLS_ENC_LEVEL_APP].pktns);
+		quic_set_tls_alert(qc, SSL_AD_HANDSHAKE_FAILURE);
+	}
+
 	TRACE_LEAVE(QUIC_EV_CONN_RWSEC, qc, &level);
 	return ret;
 }
@@ -2068,18 +2085,21 @@ static inline void qc_treat_newly_acked_pkts(struct quic_conn *qc,
 }
 
 /* Release all the frames attached to <pktns> packet number space */
-static inline void qc_release_pktns_frms(struct quic_conn *qc,
-                                         struct quic_pktns *pktns)
+void qc_release_pktns_frms(struct quic_conn *qc, struct quic_pktns *pktns)
 {
 	struct quic_frame *frm, *frmbak;
 
 	TRACE_ENTER(QUIC_EV_CONN_PHPKTS, qc);
+
+	if (!pktns)
+		goto leave;
 
 	list_for_each_entry_safe(frm, frmbak, &pktns->tx.frms, list) {
 		LIST_DELETE(&frm->list);
 		pool_free(pool_head_quic_frame, frm);
 	}
 
+ leave:
 	TRACE_LEAVE(QUIC_EV_CONN_PHPKTS, qc);
 }
 
@@ -2970,6 +2990,20 @@ static int qc_parse_pkt_frms(struct quic_conn *qc, struct quic_rx_packet *pkt,
 	pos = pkt->data + pkt->aad_len;
 	end = pkt->data + pkt->len;
 
+	/* Packet with no frame. */
+	if (pos == end) {
+		/* RFC9000 12.4. Frames and Frame Types
+		 *
+		 * The payload of a packet that contains frames MUST contain at least
+		 * one frame, and MAY contain multiple frames and multiple frame types.
+		 * An endpoint MUST treat receipt of a packet containing no frames as a
+		 * connection error of type PROTOCOL_VIOLATION. Frames always fit within
+		 * a single QUIC packet and cannot span multiple packets.
+		 */
+		quic_set_connection_close(qc, quic_err_transport(QC_ERR_PROTOCOL_VIOLATION));
+		goto leave;
+	}
+
 	while (pos < end) {
 		if (!qc_parse_frm(&frm, pkt, &pos, end, qc)) {
 			// trace already emitted by function above
@@ -3307,6 +3341,8 @@ static int qc_prep_app_pkts(struct quic_conn *qc, struct buffer *buf,
 		pkt = qc_build_pkt(&pos, end, qel, &qel->tls_ctx, frms, qc, NULL, 0,
 		                   QUIC_PACKET_TYPE_SHORT, must_ack, 0, probe, cc, &err);
 		switch (err) {
+		case -3:
+			goto leave;
 		case -2:
 			// trace already emitted by function above
 			goto leave;
@@ -3459,6 +3495,11 @@ static int qc_prep_pkts(struct quic_conn *qc, struct buffer *buf,
 		                       qc, ver, dglen, pkt_type,
 		                       must_ack, padding, probe, cc, &err);
 		switch (err) {
+		case -3:
+			if (first_pkt)
+				qc_txb_store(buf, dglen, first_pkt);
+			qc_purge_tx_buf(qc, buf);
+			goto leave;
 		case -2:
 			// trace already emitted by function above
 			goto leave;
@@ -3536,6 +3577,49 @@ static int qc_prep_pkts(struct quic_conn *qc, struct buffer *buf,
  leave:
 	TRACE_LEAVE(QUIC_EV_CONN_PHPKTS, qc);
 	return ret;
+}
+
+/* Free all frames in <l> list. In addition also remove all these frames
+ * from the original ones if they are the results of duplications.
+ */
+static inline void qc_free_frm_list(struct list *l, struct quic_conn *qc)
+{
+	struct quic_frame *frm, *frmbak;
+
+	list_for_each_entry_safe(frm, frmbak, l, list) {
+		qc_frm_unref(qc, frm);
+		LIST_DEL_INIT(&frm->ref);
+		pool_free(pool_head_quic_frame, frm);
+	}
+}
+
+/* Free <pkt> TX packet and all the packets coalesced to it. */
+static inline void qc_free_tx_coalesced_pkts(struct quic_conn *qc, struct quic_tx_packet *p)
+{
+	struct quic_tx_packet *pkt, *nxt_pkt;
+
+	for (pkt = p; pkt; pkt = nxt_pkt) {
+		qc_free_frm_list(&pkt->frms, qc);
+		nxt_pkt = pkt->next;
+		pool_free(pool_head_quic_tx_packet, pkt);
+	}
+}
+
+/* Purge <buf> TX buffer from its prepare packets. */
+static void qc_purge_tx_buf(struct quic_conn *qc, struct buffer *buf)
+{
+	while (b_contig_data(buf, 0)) {
+		uint16_t dglen;
+		struct quic_tx_packet *pkt;
+		size_t headlen = sizeof dglen + sizeof pkt;
+
+		dglen = read_u16(b_head(buf));
+		pkt = read_ptr(b_head(buf) + sizeof dglen);
+		qc_free_tx_coalesced_pkts(qc, pkt);
+		b_del(buf, dglen + headlen);
+	}
+
+	BUG_ON(b_data(buf));
 }
 
 /* Send datagrams stored in <buf>.
@@ -4143,19 +4227,22 @@ int qc_treat_rx_pkts(struct quic_conn *qc, struct quic_enc_level *cur_el,
 			else {
 				struct quic_arng ar = { .first = pkt->pn, .last = pkt->pn };
 
-				if (pkt->flags & QUIC_FL_RX_PACKET_ACK_ELICITING) {
-					qel->pktns->flags |= QUIC_FL_PKTNS_ACK_REQUIRED;
-					qel->pktns->rx.nb_aepkts_since_last_ack++;
-					qc_idle_timer_rearm(qc, 1);
-				}
-				if (pkt->pn > largest_pn) {
-					largest_pn = pkt->pn;
-					largest_pn_time_received = pkt->time_received;
-				}
 				/* Update the list of ranges to acknowledge. */
-				if (!quic_update_ack_ranges_list(qc, &qel->pktns->rx.arngs, &ar))
+				if (quic_update_ack_ranges_list(qc, &qel->pktns->rx.arngs, &ar)) {
+					if (pkt->flags & QUIC_FL_RX_PACKET_ACK_ELICITING) {
+						qel->pktns->flags |= QUIC_FL_PKTNS_ACK_REQUIRED;
+						qel->pktns->rx.nb_aepkts_since_last_ack++;
+						qc_idle_timer_rearm(qc, 1);
+					}
+					if (pkt->pn > largest_pn) {
+						largest_pn = pkt->pn;
+						largest_pn_time_received = pkt->time_received;
+					}
+				}
+				else {
 					TRACE_ERROR("Could not update ack range list",
 					            QUIC_EV_CONN_RXPKT, qc);
+				}
 			}
 		}
 		node = eb64_next(node);
@@ -4977,14 +5064,28 @@ static struct quic_conn *qc_new_conn(const struct quic_version *qv, int ipv4,
                                      int server, int token, void *owner)
 {
 	int i;
-	struct quic_conn *qc;
+	struct quic_conn *qc = NULL;
 	/* Initial CID. */
 	struct quic_connection_id *icid;
 	char *buf_area = NULL;
 	struct listener *l = NULL;
 	struct quic_cc_algo *cc_algo = NULL;
 	struct quic_tls_ctx *ictx;
+	unsigned int next_actconn = 0, next_sslconn = 0;
 	TRACE_ENTER(QUIC_EV_CONN_INIT);
+
+	next_actconn = increment_actconn();
+	if (!next_actconn) {
+		TRACE_STATE("maxconn reached", QUIC_EV_CONN_INIT);
+		goto err;
+	}
+
+	next_sslconn = increment_sslconn();
+	if (!next_sslconn) {
+		TRACE_STATE("sslconn reached", QUIC_EV_CONN_INIT);
+		goto err;
+	}
+
 	/* TODO replace pool_zalloc by pool_alloc(). This requires special care
 	 * to properly initialized internal quic_conn members to safely use
 	 * quic_conn_release() on alloc failure.
@@ -4994,6 +5095,11 @@ static struct quic_conn *qc_new_conn(const struct quic_version *qv, int ipv4,
 		TRACE_ERROR("Could not allocate a new connection", QUIC_EV_CONN_INIT);
 		goto err;
 	}
+
+	/* Now that quic_conn instance is allocated, quic_conn_release() will
+	 * ensure global accounting is decremented.
+	 */
+	next_sslconn = next_actconn = 0;
 
 	/* Initialize in priority qc members required for a safe dealloc. */
 
@@ -5147,6 +5253,16 @@ static struct quic_conn *qc_new_conn(const struct quic_version *qv, int ipv4,
 		qc->rx.buf.area = NULL;
 		quic_conn_release(qc);
 	}
+
+	/* Decrement global counters. Done only for errors happening before or
+	 * on pool_head_quic_conn alloc. All other cases are covered by
+	 * quic_conn_release().
+	 */
+	if (next_actconn)
+		_HA_ATOMIC_DEC(&actconn);
+	if (next_sslconn)
+		_HA_ATOMIC_DEC(&global.sslconns);
+
 	TRACE_LEAVE(QUIC_EV_CONN_INIT);
 	return NULL;
 }
@@ -5241,6 +5357,13 @@ void quic_conn_release(struct quic_conn *qc)
 	pool_free(pool_head_quic_conn, qc);
 	qc = NULL;
 
+	/* Decrement global counters when quic_conn is deallocated.
+	 * quic_cc_conn instances are not accounted as they run for a short
+	 * time with limited ressources.
+	 */
+	_HA_ATOMIC_DEC(&actconn);
+	_HA_ATOMIC_DEC(&global.sslconns);
+
 	TRACE_PROTO("QUIC conn. freed", QUIC_EV_CONN_FREED, qc);
 
 	TRACE_LEAVE(QUIC_EV_CONN_CLOSE, qc);
@@ -5276,7 +5399,36 @@ static void qc_idle_timer_do_rearm(struct quic_conn *qc)
 {
 	unsigned int expire;
 
-	expire = QUIC_MAX(3 * quic_pto(qc), qc->max_idle_timeout);
+	/* It is possible the idle timer task has been already released. */
+	if (!qc->idle_timer_task)
+		return;
+
+	if (qc->flags & (QUIC_FL_CONN_CLOSING|QUIC_FL_CONN_DRAINING)) {
+		/* RFC 9000 10.2. Immediate Close
+		 *
+		 * The closing and draining connection states exist to ensure that
+		 * connections close cleanly and that delayed or reordered packets are
+		 * properly discarded. These states SHOULD persist for at least three
+		 * times the current PTO interval as defined in [QUIC-RECOVERY].
+		 */
+
+		/* Delay is limited to 1s which should cover most of
+		 * network conditions. The process should not be
+		 * impacted by a connection with a high RTT.
+		 */
+		expire = MIN(3 * quic_pto(qc), 1000);
+	}
+	else {
+		/* RFC 9000 10.1. Idle Timeout
+		 *
+		 * To avoid excessively small idle timeout periods, endpoints MUST
+		 * increase the idle timeout period to be at least three times the
+		 * current Probe Timeout (PTO). This allows for multiple PTOs to expire,
+		 * and therefore multiple probes to be sent and lost, prior to idle
+		 * timeout.
+		 */
+		expire = QUIC_MAX(3 * quic_pto(qc), qc->max_idle_timeout);
+	}
 	qc->idle_timer_task->expire = tick_add(now_ms, MS_TO_TICKS(expire));
 	task_queue(qc->idle_timer_task);
 	TRACE_PROTO("idle timer armed", QUIC_EV_CONN_IDLE_TIMER, qc);
@@ -5321,8 +5473,13 @@ struct task *qc_idle_timer_task(struct task *t, void *ctx, unsigned int state)
 	if (qc->mux_state != QC_MUX_READY) {
 		quic_conn_release(qc);
 		qc = NULL;
-		t = NULL;
 	}
+	else {
+		task_destroy(t);
+		qc->idle_timer_task = NULL;
+	}
+
+	t = NULL;
 
 	/* TODO if the quic-conn cannot be freed because of the MUX, we may at
 	 * least clean some parts of it such as the tasklet.
@@ -6137,6 +6294,9 @@ static int qc_conn_alloc_ssl_ctx(struct quic_conn *qc)
 	/* Store the allocated context in <qc>. */
 	qc->xprt_ctx = ctx;
 
+	/* global.sslconns is already incremented on INITIAL packet parsing. */
+	_HA_ATOMIC_INC(&global.totalsslconns);
+
 	ret = 1;
  leave:
 	TRACE_LEAVE(QUIC_EV_CONN_NEW, qc);
@@ -6250,6 +6410,7 @@ static struct quic_conn *quic_rx_pkt_retrieve_conn(struct quic_rx_packet *pkt,
 
  err:
 	HA_ATOMIC_INC(&prx_counters->dropped_pkt);
+
 	TRACE_LEAVE(QUIC_EV_CONN_LPKT);
 	return NULL;
 }
@@ -7010,7 +7171,8 @@ static void qc_build_cc_frm(struct quic_conn *qc, struct quic_enc_level *qel,
 		}
 		else {
 			out->type = QUIC_FT_CONNECTION_CLOSE_APP;
-			out->connection_close.error_code = qc->err.code;
+			out->connection_close_app.error_code = qc->err.code;
+			out->connection_close_app.reason_phrase_len = 0;
 		}
 	}
 	else {
@@ -7141,11 +7303,16 @@ static int qc_do_build_pkt(unsigned char *pos, const unsigned char *end,
 		                   end - pos, &len_frms, pos - beg, qel, qc)) {
 			TRACE_PROTO("Not enough room", QUIC_EV_CONN_TXPKT,
 			            qc, NULL, NULL, &room);
+			if (padding) {
+				len_frms = 0;
+				goto comp_pkt_len;
+			}
 			if (!ack_frm_len && !qel->pktns->tx.pto_probe)
 				goto no_room;
 		}
 	}
 
+comp_pkt_len:
 	/* Length (of the remaining data). Must not fail because, the buffer size
 	 * has been checked above. Note that we have reserved QUIC_TLS_TAG_LEN bytes
 	 * for the encryption tag. It must be taken into an account for the length
@@ -7302,8 +7469,8 @@ static inline void quic_tx_packet_init(struct quic_tx_packet *pkt, int type)
  * type for <qc> QUIC connection from <qel> encryption level from <frms> list
  * of prebuilt frames.
  *
- * Return -2 if the packet could not be allocated or encrypted for any reason,
- * -1 if there was not enough room to build a packet.
+ + * Return -3 if the packet could not be allocated, -2 if could not be encrypted for
+ + * any reason, -1 if there was not enough room to build a packet.
  * XXX NOTE XXX
  * If you provide provide qc_build_pkt() with a big enough buffer to build a packet as big as
  * possible (to fill an MTU), the unique reason why this function may fail is the congestion
@@ -7330,7 +7497,7 @@ static struct quic_tx_packet *qc_build_pkt(unsigned char **pos,
 	pkt = pool_alloc(pool_head_quic_tx_packet);
 	if (!pkt) {
 		TRACE_DEVEL("Not enough memory for a new packet", QUIC_EV_CONN_TXPKT, qc);
-		*err = -2;
+		*err = -3;
 		goto err;
 	}
 

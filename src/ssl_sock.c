@@ -2776,6 +2776,7 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *arg)
 	}
 	if (has_ecdsa_sig) {  /* in very rare case: has ecdsa sign but not a ECDSA cipher */
 		const SSL_CIPHER *cipher;
+		uint32_t cipher_id;
 		size_t len;
 		const uint8_t *cipher_suites;
 		has_ecdsa_sig = 0;
@@ -2794,7 +2795,16 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *arg)
 #else
 			cipher = SSL_CIPHER_find(ssl, cipher_suites);
 #endif
-			if (cipher && SSL_CIPHER_get_auth_nid(cipher) == NID_auth_ecdsa) {
+			if (!cipher)
+				continue;
+
+			cipher_id = SSL_CIPHER_get_id(cipher);
+			/* skip the SCSV "fake" signaling ciphersuites because they are NID_auth_any (RFC 7507) */
+			if (cipher_id == SSL3_CK_SCSV || cipher_id == SSL3_CK_FALLBACK_SCSV)
+				continue;
+
+			if (SSL_CIPHER_get_auth_nid(cipher) == NID_auth_ecdsa
+			    || SSL_CIPHER_get_auth_nid(cipher) == NID_auth_any) {
 				has_ecdsa_sig = 1;
 				break;
 			}
@@ -5854,6 +5864,27 @@ static int ssl_sock_start(struct connection *conn, void *xprt_ctx)
 	return 0;
 }
 
+/* Similar to increment_actconn() but for SSL connections. */
+int increment_sslconn()
+{
+	unsigned int count, next_sslconn;
+
+	do {
+		count = global.sslconns;
+		if (global.maxsslconn && count >= global.maxsslconn) {
+			/* maxconn reached */
+			next_sslconn = 0;
+			goto end;
+		}
+
+		/* try to increment sslconns */
+		next_sslconn = count + 1;
+	} while (!_HA_ATOMIC_CAS(&global.sslconns, &count, next_sslconn) && __ha_cpu_relax());
+
+ end:
+	return next_sslconn;
+}
+
 /*
  * This function is called if SSL * context is not yet allocated. The function
  * is designed to be called before any other data-layer operation and sets the
@@ -5863,6 +5894,8 @@ static int ssl_sock_start(struct connection *conn, void *xprt_ctx)
 static int ssl_sock_init(struct connection *conn, void **xprt_ctx)
 {
 	struct ssl_sock_ctx *ctx;
+	int next_sslconn = 0;
+
 	/* already initialized */
 	if (*xprt_ctx)
 		return 0;
@@ -5890,6 +5923,12 @@ static int ssl_sock_init(struct connection *conn, void **xprt_ctx)
 	ctx->xprt_ctx = NULL;
 	ctx->error_code = 0;
 
+	next_sslconn = increment_sslconn();
+	if (!next_sslconn) {
+		conn->err_code = CO_ER_SSL_TOO_MANY;
+		goto err;
+	}
+
 	/* Only work with sockets for now, this should be adapted when we'll
 	 * add QUIC support.
 	 */
@@ -5897,11 +5936,6 @@ static int ssl_sock_init(struct connection *conn, void **xprt_ctx)
 	if (ctx->xprt->init) {
 		if (ctx->xprt->init(conn, &ctx->xprt_ctx) != 0)
 			goto err;
-	}
-
-	if (global.maxsslconn && global.sslconns >= global.maxsslconn) {
-		conn->err_code = CO_ER_SSL_TOO_MANY;
-		goto err;
 	}
 
 	/* If it is in client mode initiate SSL session
@@ -5928,7 +5962,6 @@ static int ssl_sock_init(struct connection *conn, void **xprt_ctx)
 		/* leave init state and start handshake */
 		conn->flags |= CO_FL_SSL_WAIT_HS | CO_FL_WAIT_L6_CONN;
 
-		_HA_ATOMIC_INC(&global.sslconns);
 		_HA_ATOMIC_INC(&global.totalsslconns);
 		*xprt_ctx = ctx;
 		return 0;
@@ -5961,7 +5994,6 @@ static int ssl_sock_init(struct connection *conn, void **xprt_ctx)
 			conn->flags |= CO_FL_EARLY_SSL_HS;
 #endif
 
-		_HA_ATOMIC_INC(&global.sslconns);
 		_HA_ATOMIC_INC(&global.totalsslconns);
 		*xprt_ctx = ctx;
 		return 0;
@@ -5969,6 +6001,8 @@ static int ssl_sock_init(struct connection *conn, void **xprt_ctx)
 	/* don't know how to handle such a target */
 	conn->err_code = CO_ER_SSL_NO_TARGET;
 err:
+	if (next_sslconn)
+		_HA_ATOMIC_DEC(&global.sslconns);
 	if (ctx && ctx->wait_event.tasklet)
 		tasklet_free(ctx->wait_event.tasklet);
 	pool_free(ssl_sock_ctx_pool, ctx);

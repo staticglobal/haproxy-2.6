@@ -1026,6 +1026,12 @@ static int cli_io_handler_clear_map(struct appctx *appctx)
 		applet_have_more_data(appctx);
 		return 0;
 	}
+
+#if defined(HA_HAVE_MALLOC_TRIM)
+	if (finished) {
+		malloc_trim(0);
+	}
+#endif
 	return 1;
 }
 

@@ -123,23 +123,6 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 
 	qcc->strms[type].nb_streams++;
 
-	/* Allocate transport layer stream descriptor. Only needed for TX. */
-	if (!quic_stream_is_uni(id) || !quic_stream_is_remote(qcc, id)) {
-		struct quic_conn *qc = qcc->conn->handle.qc;
-		qcs->stream = qc_stream_desc_new(id, type, qcs, qc);
-		if (!qcs->stream) {
-			TRACE_ERROR("qc_stream_desc alloc failure", QMUX_EV_QCS_NEW, qcc->conn, qcs);
-			goto err;
-		}
-	}
-
-	if (qcc->app_ops->attach) {
-		if (qcc->app_ops->attach(qcs, qcc->ctx)) {
-			TRACE_ERROR("app proto failure", QMUX_EV_QCS_NEW, qcc->conn, qcs);
-			goto err;
-		}
-	}
-
 	/* If stream is local, use peer remote-limit, or else the opposite. */
 	if (quic_stream_is_bidi(id)) {
 		qcs->tx.msd = quic_stream_is_local(qcc, id) ? qcc->rfctl.msd_bidi_r :
@@ -148,6 +131,10 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 	else if (quic_stream_is_local(qcc, id)) {
 		qcs->tx.msd = qcc->rfctl.msd_uni_l;
 	}
+
+	/* Properly set flow-control blocking if initial MSD is nul. */
+	if (!qcs->tx.msd)
+		qcs->flags |= QC_SF_BLK_SFCTL;
 
 	qcs->rx.ncbuf = NCBUF_NULL;
 	qcs->rx.app_buf = BUF_NULL;
@@ -171,6 +158,23 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 	qcs->subs = NULL;
 
 	qcs->err = 0;
+
+	/* Allocate transport layer stream descriptor. Only needed for TX. */
+	if (!quic_stream_is_uni(id) || !quic_stream_is_remote(qcc, id)) {
+		struct quic_conn *qc = qcc->conn->handle.qc;
+		qcs->stream = qc_stream_desc_new(id, type, qcs, qc);
+		if (!qcs->stream) {
+			TRACE_ERROR("qc_stream_desc alloc failure", QMUX_EV_QCS_NEW, qcc->conn, qcs);
+			goto err;
+		}
+	}
+
+	if (qcc->app_ops->attach) {
+		if (qcc->app_ops->attach(qcs, qcc->ctx)) {
+			TRACE_ERROR("app proto failure", QMUX_EV_QCS_NEW, qcc->conn, qcs);
+			goto err;
+		}
+	}
 
  out:
 	TRACE_LEAVE(QMUX_EV_QCS_NEW, qcc->conn, qcs);
@@ -224,7 +228,7 @@ static inline int qcc_is_dead(const struct qcc *qcc)
 	/* Mux connection is considered dead if :
 	 * - all stream-desc are detached AND
 	 *   = connection is on error OR
-	 *   = mux timeout has already fired or is unset
+	 * - MUX timeout expired
 	 */
 	if (!qcc->nb_sc && ((qcc->conn->flags & CO_FL_ERROR) || !qcc->task))
 		return 1;
@@ -1689,9 +1693,6 @@ static int qc_send(struct qcc *qcc)
 		}
 	}
 
-	if (qcc->flags & QC_CF_BLK_MFCTL)
-		return 0;
-
 	if (!(qcc->flags & QC_CF_APP_FINAL) && !eb_is_empty(&qcc->streams_by_id) &&
 	    qcc->app_ops->finalize) {
 		/* Finalize the application layer before sending any stream.
@@ -1727,7 +1728,8 @@ static int qc_send(struct qcc *qcc)
 			continue;
 		}
 
-		if (qcs->flags & QC_SF_BLK_SFCTL) {
+		if (qcc->flags & QC_CF_BLK_MFCTL ||
+		    qcs->flags & QC_SF_BLK_SFCTL) {
 			node = eb64_next(node);
 			continue;
 		}
@@ -2019,6 +2021,7 @@ static struct task *qc_timeout_task(struct task *t, void *ctx, unsigned int stat
 		goto out;
 	}
 
+	/* Mark timeout as triggered by setting task to NULL. */
 	qcc->task = NULL;
 
 	/* TODO depending on the timeout condition, different shutdown mode
@@ -2141,19 +2144,18 @@ static int qc_init(struct connection *conn, struct proxy *prx,
 
 	qcc->proxy = prx;
 	/* haproxy timeouts */
-	qcc->task = NULL;
 	qcc->timeout = conn_is_back(qcc->conn) ? prx->timeout.server :
 	                                         prx->timeout.client;
-	if (tick_isset(qcc->timeout)) {
-		qcc->task = task_new_here();
-		if (!qcc->task) {
-			TRACE_ERROR("timeout task alloc failure", QMUX_EV_QCC_NEW);
-			goto fail_no_timeout_task;
-		}
-		qcc->task->process = qc_timeout_task;
-		qcc->task->context = qcc;
-		qcc->task->expire = tick_add(now_ms, qcc->timeout);
+
+	qcc->task = task_new_here();
+	if (!qcc->task) {
+		TRACE_ERROR("timeout task alloc failure", QMUX_EV_QCC_NEW);
+		goto fail_no_timeout_task;
 	}
+	qcc->task->process = qc_timeout_task;
+	qcc->task->context = qcc;
+	qcc->task->expire = tick_add(now_ms, qcc->timeout);
+
 	qcc_reset_idle_start(qcc);
 	LIST_INIT(&qcc->opening_list);
 
@@ -2224,12 +2226,9 @@ static void qc_detach(struct sedesc *sd)
 		TRACE_STATE("killing dead connection", QMUX_EV_STRM_END, qcc->conn);
 		goto release;
 	}
-	else if (qcc->task) {
+	else {
 		TRACE_DEVEL("refreshing connection's timeout", QMUX_EV_STRM_END, qcc->conn);
 		qcc_refresh_timeout(qcc);
-	}
-	else {
-		TRACE_DEVEL("completed", QMUX_EV_STRM_END, qcc->conn);
 	}
 
 	TRACE_LEAVE(QMUX_EV_STRM_END, qcc->conn);

@@ -677,6 +677,20 @@ int stktable_init(struct stktable *t)
 	return 1;
 }
 
+/* Performs stick table cleanup: it's meant to be called after the table
+ * has been initialized ith stktable_init(), else it will lead to undefined
+ * behavior.
+ *
+ * However it does not free the table pointer itself
+ */
+void stktable_deinit(struct stktable *t)
+{
+	if (!t)
+		return;
+	task_destroy(t->exp_task);
+	pool_destroy(t->pool);
+}
+
 /*
  * Configuration keywords of known table types
  */
@@ -846,6 +860,7 @@ int parse_stick_table(const char *file, int linenum, char **args,
 				err_code |= ERR_ALERT | ERR_FATAL;
 				goto out;
 			}
+			ha_free(&t->peers.name);
 			t->peers.name = strdup(args[idx++]);
 		}
 		else if (strcmp(args[idx], "expire") == 0) {
@@ -4514,7 +4529,8 @@ static int table_process_entry_per_key(struct appctx *appctx, char **args)
 
 	switch (t->type) {
 	case SMP_T_IPV4:
-		uint32_key = htonl(inetaddr_host(args[4]));
+		if (inet_pton(AF_INET, args[4], &uint32_key) <= 0)
+			return cli_err(appctx, "Invalid key\n");
 		static_table_key.key = &uint32_key;
 		break;
 	case SMP_T_IPV6:

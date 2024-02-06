@@ -348,8 +348,9 @@ void free_proxy(struct proxy *p)
 
 	pool_destroy(p->req_cap_pool);
 	pool_destroy(p->rsp_cap_pool);
-	if (p->table)
-		pool_destroy(p->table->pool);
+
+	stktable_deinit(p->table);
+	ha_free(&p->table);
 
 	HA_RWLOCK_DESTROY(&p->lbprm.lock);
 	HA_RWLOCK_DESTROY(&p->lock);
@@ -1377,6 +1378,9 @@ void init_new_proxy(struct proxy *p)
 	p->extra_counters_be = NULL;
 
 	HA_RWLOCK_INIT(&p->lock);
+
+	/* initialize the default settings */
+	proxy_preset_defaults(p);
 }
 
 /* Preset default settings onto proxy <defproxy>. */
@@ -1419,9 +1423,6 @@ void proxy_preset_defaults(struct proxy *defproxy)
 
 	defproxy->email_alert.level = LOG_ALERT;
 	defproxy->load_server_state_from_file = PR_SRV_STATE_FILE_UNSPEC;
-#if defined(USE_QUIC)
-	quic_transport_params_init(&defproxy->defsrv.quic_params, 0);
-#endif
 
 	if (defproxy->cap & PR_CAP_INT)
 		defproxy->timeout.connect = 5000;
@@ -1441,6 +1442,7 @@ void proxy_free_defaults(struct proxy *defproxy)
 
 	ha_free(&defproxy->id);
 	ha_free(&defproxy->conf.file);
+	ha_free((char **)&defproxy->defsrv.conf.file);
 	ha_free(&defproxy->check_command);
 	ha_free(&defproxy->check_path);
 	ha_free(&defproxy->cookie_name);
@@ -1898,9 +1900,6 @@ struct proxy *parse_new_proxy(const char *name, unsigned int cap,
 			ha_free(&curproxy);
 			return NULL;
 		}
-	}
-	else {
-		proxy_preset_defaults(curproxy);
 	}
 
 	curproxy->conf.args.file = curproxy->conf.file = strdup(file);

@@ -138,7 +138,15 @@
 #define HTX_SL_F_NORMALIZED_URI 0x00000800 /* The received URI is normalized (an implicit absolute-uri form) */
 #define HTX_SL_F_CONN_UPG       0x00001000 /* The message contains "connection: upgrade" header */
 
-/* HTX flags */
+/* Overhead induced by HTX on buffers during transfers. In addition to the size
+ * of the HTX structure itself, and meta data for one block, another block is
+ * accounted to favored zero-copy xfer.
+ */
+#define HTX_BUF_OVERHEAD     (sizeof(struct htx) + 2 * sizeof(struct htx_blk))
+
+/* HTX flags.
+ * Please also update the htx_show_flags() function below in case of changes.
+ */
 #define HTX_FL_NONE              0x00000000
 #define HTX_FL_PARSING_ERROR     0x00000001 /* Set when a parsing error occurred */
 #define HTX_FL_PROCESSING_ERROR  0x00000002 /* Set when a processing error occurred */

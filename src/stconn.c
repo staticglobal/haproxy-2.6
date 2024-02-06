@@ -510,15 +510,12 @@ struct appctx *sc_applet_create(struct stconn *sc, struct applet *app)
  */
 static inline int sc_cond_forward_shutw(struct stconn *sc)
 {
-	/* Foward the shutdown if an write error occurred on the input channel */
-	if (sc_ic(sc)->flags & CF_WRITE_TIMEOUT)
-		return 1;
 
 	/* The close must not be forwarded */
 	if (!(sc_ic(sc)->flags & CF_SHUTR) || !(sc->flags & SC_FL_NOHALF))
 		return 0;
 
-	if (!channel_is_empty(sc_ic(sc))) {
+	if (!channel_is_empty(sc_ic(sc)) && !(sc_ic(sc)->flags & CF_WRITE_TIMEOUT)) {
 		/* the close to the write side cannot be forwarded now because
 		 * we should flush outgoing data first. But instruct the output
 		 * channel it should be done ASAP.
@@ -1189,7 +1186,7 @@ static void sc_notify(struct stconn *sc)
 	 */
 	if (!channel_is_empty(ic) &&
 	    sc_ep_test(sco, SE_FL_WAIT_DATA) &&
-	    (!(ic->flags & CF_EXPECT_MORE) || c_full(ic) || ci_data(ic) == 0 || ic->pipe)) {
+	    (!(ic->flags & CF_EXPECT_MORE) || channel_full(ic, co_data(ic)) || channel_input_data(ic) == 0)) {
 		int new_len, last_len;
 
 		last_len = co_data(ic);
@@ -1375,7 +1372,7 @@ static int sc_conn_recv(struct stconn *sc)
 	if (sc_ep_test(sc, SE_FL_MAY_SPLICE) &&
 	    (ic->pipe || ic->to_forward >= MIN_SPLICE_FORWARD) &&
 	    ic->flags & CF_KERN_SPLICING) {
-		if (c_data(ic)) {
+		if (channel_data(ic)) {
 			/* We're embarrassed, there are already data pending in
 			 * the buffer and we don't want to have them at two
 			 * locations at a time. Let's indicate we need some
@@ -1455,7 +1452,10 @@ static int sc_conn_recv(struct stconn *sc)
 	}
 
 	/* Instruct the mux it must subscribed for read events */
-	flags |= ((!conn_is_back(conn) && (__sc_strm(sc)->be->options & PR_O_ABRT_CLOSE)) ? CO_RFL_KEEP_RECV : 0);
+	if (!conn_is_back(conn) &&                                 /* for frontend conns only */
+	    (sc_opposite(sc)->state != SC_ST_INI) &&               /* before backend connection setup */
+	    (__sc_strm(sc)->be->options & PR_O_ABRT_CLOSE))        /* if abortonclose option is set for the current backend */
+		flags |= CO_RFL_KEEP_RECV;
 
 	/* Important note : if we're called with POLL_IN|POLL_HUP, it means the read polling
 	 * was enabled, which implies that the recv buffer was not full. So we have a guarantee
@@ -1585,8 +1585,7 @@ static int sc_conn_recv(struct stconn *sc)
 				ic->flags &= ~CF_STREAMER_FAST;
 			}
 		}
-		else if (!(ic->flags & CF_STREAMER_FAST) &&
-			 (cur_read >= ic->buf.size - global.tune.maxrewrite)) {
+		else if (!(ic->flags & CF_STREAMER_FAST) && (cur_read >= channel_data_limit(ic))) {
 			/* we read a full buffer at once */
 			ic->xfer_small = 0;
 			ic->xfer_large++;

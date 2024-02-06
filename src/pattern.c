@@ -2083,12 +2083,6 @@ int pat_ref_purge_range(struct pat_ref *ref, uint from, uint to, int budget)
 	list_for_each_entry(expr, &ref->pat, list)
 		HA_RWLOCK_WRUNLOCK(PATEXP_LOCK, &expr->lock);
 
-#if defined(HA_HAVE_MALLOC_TRIM)
-	if (done) {
-		malloc_trim(0);
-	}
-#endif
-
 	return done;
 }
 

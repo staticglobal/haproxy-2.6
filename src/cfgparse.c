@@ -3794,7 +3794,7 @@ out_uri_auth_compat:
 		/* Check the mux protocols, if any, for each listener and server
 		 * attached to the current proxy */
 		list_for_each_entry(bind_conf, &curproxy->conf.bind, by_fe) {
-			int mode = (1 << (curproxy->mode == PR_MODE_HTTP));
+			int mode = conn_pr_mode_to_proto_mode(curproxy->mode);
 			const struct mux_proto_list *mux_ent;
 
 			if (!bind_conf->mux_proto) {
@@ -3845,7 +3845,7 @@ out_uri_auth_compat:
 			bind_conf->mux_proto = mux_ent;
 		}
 		for (newsrv = curproxy->srv; newsrv; newsrv = newsrv->next) {
-			int mode = (1 << (curproxy->mode == PR_MODE_HTTP));
+			int mode = conn_pr_mode_to_proto_mode(curproxy->mode);
 			const struct mux_proto_list *mux_ent;
 
 			if (!newsrv->mux_proto)
@@ -4006,17 +4006,14 @@ init_proxies_list_stage2:
 					memprintf(&listener->name, "sock-%d", listener->luid);
 			}
 
-			if (curproxy->options & PR_O_TCP_NOLING)
-				listener->options |= LI_O_NOLINGER;
-			if (!listener->maxaccept)
-				listener->maxaccept = global.tune.maxaccept ? global.tune.maxaccept : MAX_ACCEPT;
-
 			/* listener accept callback */
 			listener->accept = session_accept_fd;
 #ifdef USE_QUIC
 			/* override the accept callback for QUIC listeners. */
 			if (listener->flags & LI_F_QUIC_LISTENER) {
 				li_init_per_thr(listener);
+				/* quic_conn are counted against maxconn. */
+				listener->bind_conf->options |= BC_O_XPRT_MAXCONN;
 			}
 #endif
 
@@ -4184,7 +4181,7 @@ init_proxies_list_stage2:
 		if (t->proxy)
 			continue;
 		if (!stktable_init(t)) {
-			ha_alert("Proxy '%s': failed to initialize stick-table.\n", t->id);
+			ha_alert("Parsing [%s:%d]: failed to initialize '%s' stick-table.\n", t->conf.file, t->conf.line, t->id);
 			cfgerr++;
 		}
 	}

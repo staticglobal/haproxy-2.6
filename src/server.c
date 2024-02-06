@@ -2334,9 +2334,6 @@ struct server *new_server(struct proxy *proxy)
 	srv->agent.server = srv;
 	srv->agent.proxy = proxy;
 	srv->xprt  = srv->check.xprt = srv->agent.xprt = xprt_get(XPRT_RAW);
-#if defined(USE_QUIC)
-	srv->cids = EB_ROOT_UNIQUE;
-#endif
 
 	srv->extra_counters = NULL;
 #ifdef USE_OPENSSL
@@ -2927,7 +2924,8 @@ int parse_server(const char *file, int linenum, char **args,
 	if (err_code & ERR_CODE)
 		goto out;
 
-	newsrv->conf.file = strdup(file);
+	if (!newsrv->conf.file) // note: do it only once for default-server
+		newsrv->conf.file = strdup(file);
 	newsrv->conf.line = linenum;
 
 	while (*args[cur_arg]) {
@@ -4751,7 +4749,12 @@ static int cli_parse_add_server(char **args, char *payload, struct appctx *appct
 	srv->init_addr_methods = SRV_IADDR_NONE;
 
 	if (srv->mux_proto) {
-		if (!conn_get_best_mux_entry(srv->mux_proto->token, PROTO_SIDE_BE, be->mode)) {
+		int proto_mode = conn_pr_mode_to_proto_mode(be->mode);
+		const struct mux_proto_list *mux_ent;
+
+		mux_ent = conn_get_best_mux_entry(srv->mux_proto->token, PROTO_SIDE_BE, proto_mode);
+
+		if (!mux_ent || !isteq(mux_ent->token, srv->mux_proto->token)) {
 			ha_alert("MUX protocol is not usable for server.\n");
 			goto out;
 		}
