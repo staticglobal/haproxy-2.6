@@ -93,6 +93,8 @@ typedef unsigned long long ull;
 #define QUIC_RETRY_DURATION_SEC       10
 /* Default Retry threshold */
 #define QUIC_DFLT_RETRY_THRESHOLD     100 /* in connection openings */
+/* Default ratio value applied to a dynamic Packet reorder threshold. */
+#define QUIC_DFLT_REORDER_RATIO        50 /* in percent */
 
 /*
  *  0                   1                   2                   3

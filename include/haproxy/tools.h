@@ -386,11 +386,11 @@ int addr_is_local(const struct netns_entry *ns,
  * <map> with the hexadecimal representation of their ASCII-code (2 digits)
  * prefixed by <escape>, and will store the result between <start> (included)
  * and <stop> (excluded), and will always terminate the string with a '\0'
- * before <stop>. The position of the '\0' is returned if the conversion
- * completes. If bytes are missing between <start> and <stop>, then the
- * conversion will be incomplete and truncated. If <stop> <= <start>, the '\0'
- * cannot even be stored so we return <start> without writing the 0.
+ * before <stop>. If bytes are missing between <start> and <stop>, then the
+ * conversion will be incomplete and truncated.
  * The input string must also be zero-terminated.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 extern const char hextab[];
 char *encode_string(char *start, char *stop,
@@ -410,8 +410,9 @@ char *encode_chunk(char *start, char *stop,
  * is reached or NULL-byte is encountered. The result will
  * be stored between <start> (included) and <stop> (excluded). This
  * function will always try to terminate the resulting string with a '\0'
- * before <stop>, and will return its position if the conversion
- * completes.
+ * before <stop>.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 char *escape_string(char *start, char *stop,
 		    const char escape, const long *map,
@@ -439,10 +440,18 @@ char *escape_chunk(char *start, char *stop,
  * It is useful if the escaped string is used between double quotes in the
  * format.
  *
- *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0, &trash));
+ *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0, 0, &trash));
  *
  * If <quote> is 1, the converter puts the quotes only if any character is
  * escaped. If <quote> is 2, the converter always puts the quotes.
+ *
+ * If <oneline> is not 0, CRs are skipped and LFs are replaced by spaces.
+ * This re-format multi-lines strings to only one line. The purpose is to
+ * allow a line by line parsing but also to keep the output compliant with
+ * the CLI witch uses LF to defines the end of the response.
+ *
+ * If <oneline> is 2, In addition to previous action, the trailing spaces are
+ * removed.
  *
  * <output> is a struct chunk used for storing the output string.
  *
@@ -456,14 +465,15 @@ char *escape_chunk(char *start, char *stop,
  * This function appends the encoding to the existing output chunk. Please
  * use csv_enc() instead if you want to replace the output chunk.
  */
-const char *csv_enc_append(const char *str, int quote, struct buffer *output);
+const char *csv_enc_append(const char *str, int quote, int online,
+			   struct buffer *output);
 
 /* same as above but the output chunk is reset first */
-static inline const char *csv_enc(const char *str, int quote,
+static inline const char *csv_enc(const char *str, int quote, int oneline,
 				  struct buffer *output)
 {
 	chunk_reset(output);
-	return csv_enc_append(str, quote, output);
+	return csv_enc_append(str, quote, oneline, output);
 }
 
 /* Decode an URL-encoded string in-place. The resulting string might

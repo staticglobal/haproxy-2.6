@@ -96,7 +96,7 @@ struct proxy;
 struct global {
 	int uid;
 	int gid;
-	int external_check;
+	int external_check;             /* 0=disabled, 1=enabled, 2=enabled with env */
 	int nbthread;
 	int mode;
 	unsigned int hard_stop_after;	/* maximum time allowed to perform a soft-stop */
@@ -164,6 +164,7 @@ struct global {
 		unsigned int quic_frontend_max_idle_timeout;
 		unsigned int quic_frontend_max_streams_bidi;
 		unsigned int quic_retry_threshold;
+		unsigned int quic_reorder_ratio;
 		unsigned int quic_streams_buf;
 #endif /* USE_QUIC */
 	} tune;

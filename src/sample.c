@@ -3360,7 +3360,7 @@ static int sample_conv_ungrpc(const struct arg *arg_p, struct sample *smp, void 
 	while (grpc_left > GRPC_MSG_HEADER_SZ) {
 		size_t grpc_msg_len, left;
 
-		grpc_msg_len = left = ntohl(*(uint32_t *)(pos + GRPC_MSG_COMPRESS_FLAG_SZ));
+		grpc_msg_len = left = ntohl(read_u32(pos + GRPC_MSG_COMPRESS_FLAG_SZ));
 
 		pos += GRPC_MSG_HEADER_SZ;
 		grpc_left -= GRPC_MSG_HEADER_SZ;
@@ -3830,9 +3830,7 @@ static int sample_conv_jwt_verify_check(struct arg *args, struct sample_conv *co
 static int sample_conv_jwt_verify(const struct arg *args, struct sample *smp, void *private)
 {
 	struct sample alg_smp, key_smp;
-
-	smp->data.type = SMP_T_SINT;
-	smp->data.u.sint = 0;
+	enum jwt_vrfy_status ret;
 
 	smp_set_owner(&alg_smp, smp->px, smp->sess, smp->strm, smp->opt);
 	smp_set_owner(&key_smp, smp->px, smp->sess, smp->strm, smp->opt);
@@ -3841,9 +3839,10 @@ static int sample_conv_jwt_verify(const struct arg *args, struct sample *smp, vo
 	if (!sample_conv_var2smp_str(&args[1], &key_smp))
 		return 0;
 
-	smp->data.u.sint = jwt_verify(&smp->data.u.str,  &alg_smp.data.u.str,
-				      &key_smp.data.u.str);
+	ret = jwt_verify(&smp->data.u.str,  &alg_smp.data.u.str, &key_smp.data.u.str);
 
+	smp->data.type = SMP_T_SINT;
+	smp->data.u.sint = ret;
 	return 1;
 }
 

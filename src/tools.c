@@ -1905,11 +1905,11 @@ int addr_is_local(const struct netns_entry *ns,
  * <map> with the hexadecimal representation of their ASCII-code (2 digits)
  * prefixed by <escape>, and will store the result between <start> (included)
  * and <stop> (excluded), and will always terminate the string with a '\0'
- * before <stop>. The position of the '\0' is returned if the conversion
- * completes. If bytes are missing between <start> and <stop>, then the
- * conversion will be incomplete and truncated. If <stop> <= <start>, the '\0'
- * cannot even be stored so we return <start> without writing the 0.
+ * before <stop>. If bytes are missing between <start> and <stop>, then the
+ * conversion will be incomplete and truncated.
  * The input string must also be zero-terminated.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 const char hextab[16] = "0123456789ABCDEF";
 char *encode_string(char *start, char *stop,
@@ -1931,8 +1931,9 @@ char *encode_string(char *start, char *stop,
 			string++;
 		}
 		*start = '\0';
+		return start;
 	}
-	return start;
+	return NULL;
 }
 
 /*
@@ -1961,8 +1962,9 @@ char *encode_chunk(char *start, char *stop,
 			str++;
 		}
 		*start = '\0';
+		return start;
 	}
-	return start;
+	return NULL;
 }
 
 /*
@@ -1971,8 +1973,9 @@ char *encode_chunk(char *start, char *stop,
  * is reached or NULL-byte is encountered. The result will
  * be stored between <start> (included) and <stop> (excluded). This
  * function will always try to terminate the resulting string with a '\0'
- * before <stop>, and will return its position if the conversion
- * completes.
+ * before <stop>.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 char *escape_string(char *start, char *stop,
 		    const char escape, const long *map,
@@ -1992,8 +1995,9 @@ char *escape_string(char *start, char *stop,
 			string++;
 		}
 		*start = '\0';
+		return start;
 	}
-	return start;
+	return NULL;
 }
 
 /*
@@ -2038,10 +2042,18 @@ char *escape_chunk(char *start, char *stop,
  * It is useful if the escaped string is used between double quotes in the
  * format.
  *
- *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0, &trash));
+ *    printf("..., \"%s\", ...\r\n", csv_enc(str, 0, 0, &trash));
  *
  * If <quote> is 1, the converter puts the quotes only if any reserved character
  * is present. If <quote> is 2, the converter always puts the quotes.
+ *
+ * If <oneline> is not 0, CRs are skipped and LFs are replaced by spaces.
+ * This re-format multi-lines strings to only one line. The purpose is to
+ * allow a line by line parsing but also to keep the output compliant with
+ * the CLI witch uses LF to defines the end of the response.
+ *
+ * If <oneline> is 2, In addition to previous action, the trailing spaces are
+ * removed.
  *
  * <output> is a struct buffer used for storing the output string.
  *
@@ -2057,7 +2069,7 @@ char *escape_chunk(char *start, char *stop,
  * the chunk. Please use csv_enc() instead if you want to replace the output
  * chunk.
  */
-const char *csv_enc_append(const char *str, int quote, struct buffer *output)
+const char *csv_enc_append(const char *str, int quote, int oneline, struct buffer *output)
 {
 	char *end = output->area + output->size;
 	char *out = output->area + output->data;
@@ -2073,6 +2085,19 @@ const char *csv_enc_append(const char *str, int quote, struct buffer *output)
 		*ptr++ = '"';
 
 	while (*str && ptr < end - 2) { /* -2 for reserving space for <"> and \0. */
+		if (oneline) {
+			if (*str == '\n' ) {
+				/* replace LF by a space */
+				*ptr++ = ' ';
+				str++;
+				continue;
+			}
+			else if (*str == '\r' ) {
+				/* skip CR */
+				str++;
+				continue;
+			}
+		}
 		*ptr = *str;
 		if (*str == '"') {
 			ptr++;
@@ -2084,6 +2109,12 @@ const char *csv_enc_append(const char *str, int quote, struct buffer *output)
 		}
 		ptr++;
 		str++;
+	}
+
+	if (oneline == 2) {
+		/* remove trailing spaces */
+		while (ptr > out && *(ptr - 1) == ' ')
+			ptr--;
 	}
 
 	if (quote)
@@ -5853,7 +5884,7 @@ int openssl_compare_current_name(const char *name)
 static int init_tools_per_thread()
 {
 	/* Let's make each thread start from a different position */
-	statistical_prng_state += tid * MAX_THREADS;
+	statistical_prng_state += ha_random32();
 	if (!statistical_prng_state)
 		statistical_prng_state++;
 	return 1;

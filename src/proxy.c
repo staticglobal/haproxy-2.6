@@ -231,6 +231,14 @@ void free_proxy(struct proxy *p)
 			prune_acl_cond(rule->cond);
 			free(rule->cond);
 		}
+		if (rule->dynamic) {
+			list_for_each_entry_safe(lf, lfb, &rule->be.expr, list) {
+				LIST_DELETE(&lf->list);
+				release_sample_expr(lf->expr);
+				free(lf->arg);
+				free(lf);
+			}
+		}
 		free(rule->file);
 		free(rule);
 	}

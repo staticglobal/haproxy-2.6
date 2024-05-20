@@ -3,7 +3,7 @@
                           Configuration Manual
                          ----------------------
                               version 2.6
-                              2023/12/13
+                              2024/04/05
 
 
 This document covers the configuration language as implemented in the version
@@ -56,6 +56,7 @@ Summary
 3.8.      HTTP-errors
 3.9.      Rings
 3.10.     Log forwarding
+3.11.     HTTPClient tuning
 
 4.    Proxies
 4.1.      Proxy keywords matrix
@@ -1053,10 +1054,6 @@ The following keywords are supported in the "global" section :
    - h1-case-adjust-file
    - h2-workaround-bogus-websocket-clients
    - hard-stop-after
-   - httpclient.resolvers.id
-   - httpclient.resolvers.prefer
-   - httpclient.ssl.ca-file
-   - httpclient.ssl.verify
    - insecure-fork-wanted
    - insecure-setuid-wanted
    - issuers-chain-path
@@ -1190,6 +1187,11 @@ The following keywords are supported in the "global" section :
    - quiet
    - zero-warning
 
+ * HTTPClient
+   - httpclient.resolvers.id
+   - httpclient.resolvers.prefer
+   - httpclient.ssl.ca-file
+   - httpclient.ssl.verify
 
 3.1. Process management and security
 ------------------------------------
@@ -1429,14 +1431,20 @@ expose-experimental-directives
   This statement must appear before using directives tagged as experimental or
   the config file will be rejected.
 
-external-check
+external-check [preserve-env]
   Allows the use of an external agent to perform health checks. This is
   disabled by default as a security precaution, and even when enabled, checks
   may still fail unless "insecure-fork-wanted" is enabled as well. If the
   program launched makes use of a setuid executable (it should really not),
   you may also need to set "insecure-setuid-wanted" in the global section.
-  See "option external-check", and "insecure-fork-wanted", and
-  "insecure-setuid-wanted".
+  By default, the checks start with a clean environment which only contains
+  variables defined in the "external-check" command in the backend section. It
+  may sometimes be desirable to preserve the environment though, for example
+  when complex scripts retrieve their extra paths or information there. This
+  can be done by appending the "preserve-env" keyword. In this case however it
+  is strongly advised not to run a setuid nor as a privileged user, as this
+  exposes the check program to potential attacks. See "option external-check",
+  and "insecure-fork-wanted", and "insecure-setuid-wanted" for extra details.
 
 fd-hard-limit <number>
   Sets an upper bound to the maximum number of file descriptors that the
@@ -1605,43 +1613,6 @@ hard-stop-after <time>
       hard-stop-after 30s
 
   See also: grace
-
-httpclient.resolvers.id <resolvers id>
-  This option defines the resolvers section with which the httpclient will try
-  to resolve.
-
-  Default option is the "default" resolvers ID. By default, if this option is
-  not used, it will simply disable the resolving if the section is not found.
-
-  However, when this option is explicitly enabled it will trigger a
-  configuration error if it fails to load.
-
-httpclient.resolvers.prefer <ipv4|ipv6>
-  This option allows to chose which family of IP you want when resolving,
-  which is convenient when IPv6 is not available on your network. Default
-  option is "ipv6".
-
-httpclient.ssl.ca-file <cafile>
-  This option defines the ca-file which should be used to verify the server
-  certificate. It takes the same parameters as the "ca-file" option on the
-  server line.
-
-  By default and when this option is not used, the value is
-  "@system-ca" which tries to load the CA of the system. If it fails the SSL
-  will be disabled for the httpclient.
-
-  However, when this option is explicitly enabled it will trigger a
-  configuration error if it fails.
-
-httpclient.ssl.verify [none|required]
-  Works the same way as the verify option on server lines. If specified to 'none',
-  servers certificates are not verified. Default option is "required".
-
-  By default and when this option is not used, the value is
-  "required". If it fails the SSL will be disabled for the httpclient.
-
-  However, when this option is explicitly enabled it will trigger a
-  configuration error if it fails.
 
 insecure-fork-wanted
   By default HAProxy tries hard to prevent any thread and process creation
@@ -2080,8 +2051,26 @@ ssl-default-bind-ciphersuites <ciphersuites>
   theirs. The format of the string is defined in
   "man 1 ciphers" from OpenSSL man pages under the section "ciphersuites". For
   cipher configuration for TLSv1.2 and earlier, please check the
-  "ssl-default-bind-ciphers" keyword. Please check the "bind" keyword for more
-  information.
+  "ssl-default-bind-ciphers" keyword. This setting might accept TLSv1.2
+  ciphersuites however this is an undocumented behavior and not recommended as
+  it could be inconsistent or buggy.
+  The default TLSv1.3 ciphersuites of OpenSSL are:
+  "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+
+  TLSv1.3 only supports 5 ciphersuites:
+
+  - TLS_AES_128_GCM_SHA256
+  - TLS_AES_256_GCM_SHA384
+  - TLS_CHACHA20_POLY1305_SHA256
+  - TLS_AES_128_CCM_SHA256
+  - TLS_AES_128_CCM_8_SHA256
+
+  Please check the "bind" keyword for more information.
+
+  Example:
+      global
+          ssl-default-bind-ciphers ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256
+          ssl-default-bind-ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256
 
 ssl-default-bind-curves <curves>
   This setting is only available when support for OpenSSL was built in. It sets
@@ -3022,6 +3011,12 @@ tune.quic.frontend.max-streams-bidi <number>
 
   The default value is 100.
 
+tune.quic.reorder-ratio <0..100, in percent>
+  The ratio applied to the packet reordering threshold calculated. It may
+  trigger a high packet loss detection when too small.
+
+  The default value is 50.
+
 tune.quic.retry-threshold <number>
   Warning: QUIC support in HAProxy is currently experimental. Configuration may
   change without deprecation in the future.
@@ -3825,6 +3820,50 @@ maxconn <conns>
 
 timeout client <timeout>
   Set the maximum inactivity time on the client side.
+
+3.11. HTTPClient tuning
+-----------------------
+
+HTTPClient is an internal HTTP library, it can be used by various subsystems,
+for example in LUA scripts. HTTPClient is not used in the data path, in other
+words it has nothing with HTTP traffic passing through HAProxy.
+
+httpclient.resolvers.id <resolvers id>
+  This option defines the resolvers section with which the httpclient will try
+  to resolve.
+
+  Default option is the "default" resolvers ID. By default, if this option is
+  not used, it will simply disable the resolving if the section is not found.
+
+  However, when this option is explicitly enabled it will trigger a
+  configuration error if it fails to load.
+
+httpclient.resolvers.prefer <ipv4|ipv6>
+  This option allows to chose which family of IP you want when resolving,
+  which is convenient when IPv6 is not available on your network. Default
+  option is "ipv6".
+
+httpclient.ssl.ca-file <cafile>
+  This option defines the ca-file which should be used to verify the server
+  certificate. It takes the same parameters as the "ca-file" option on the
+  server line.
+
+  By default and when this option is not used, the value is
+  "@system-ca" which tries to load the CA of the system. If it fails the SSL
+  will be disabled for the httpclient.
+
+  However, when this option is explicitly enabled it will trigger a
+  configuration error if it fails.
+
+httpclient.ssl.verify [none|required]
+  Works the same way as the verify option on server lines. If specified to 'none',
+  servers certificates are not verified. Default option is "required".
+
+  By default and when this option is not used, the value is
+  "required". If it fails the SSL will be disabled for the httpclient.
+
+  However, when this option is explicitly enabled it will trigger a
+  configuration error if it fails.
 
 4. Proxies
 ----------
@@ -7544,13 +7583,21 @@ http-request use-service <service-name> [ { if | unless } <condition> ]
 http-request wait-for-body time <time> [ at-least <bytes> ]
              [ { if | unless } <condition> ]
 
-  This will delay the processing of the request waiting for the payload for at
-  most <time> milliseconds. if "at-least" argument is specified, HAProxy stops
-  to wait the payload when the first <bytes> bytes are received. 0 means no
-  limit, it is the default value. Regardless the "at-least" argument value,
-  HAProxy stops to wait if the whole payload is received or if the request
-  buffer is full.  This action may be used as a replacement to "option
-  http-buffer-request".
+  This will delay the processing of the request or response until one of the
+  following conditions occurs:
+  - The full request body is received, in which case processing proceeds
+    normally.
+  - <bytes> bytes have been received, when the "at-least" argument is given and
+    <bytes> is non-zero, in which case processing proceeds normally.
+  - The request buffer is full, in which case processing proceeds normally. The
+    size of this buffer is determined by the "tune.bufsize" option.
+  - The request has been waiting for more than <time> milliseconds. In this
+    case HAProxy will respond with a 408 "Request Timeout" error to the client
+    and stop processing the request. Note that if any of the other conditions
+    happens first, this timeout will not occur even if the full body has
+    not yet been recieved.
+
+  This action may be used as a replacement for "option http-buffer-request".
 
   Arguments :
 
@@ -7559,7 +7606,7 @@ http-request wait-for-body time <time> [ at-least <bytes> ]
 
     <bytes>   is optional. It is the minimum payload size to receive to stop to
               wait. It follows the HAProxy size format and is expressed in
-              bytes.
+              bytes. A value of 0 (the default) means no limit.
 
   Example:
     http-request wait-for-body time 1s at-least 1k if METH_POST
@@ -14161,6 +14208,22 @@ ciphersuites <ciphersuites>
   TLSv1.3 handshake. The format of the string is defined in "man 1 ciphers" from
   OpenSSL man pages under the "ciphersuites" section. For cipher configuration
   for TLSv1.2 and earlier, please check the "ciphers" keyword.
+  This setting might accept TLSv1.2 ciphersuites however this is an
+  undocumented behavior and not recommended as it could be inconsistent or buggy.
+  The default TLSv1.3 ciphersuites of OpenSSL are:
+  "TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256"
+
+  TLSv1.3 only supports 5 ciphersuites:
+
+  - TLS_AES_128_GCM_SHA256
+  - TLS_AES_256_GCM_SHA384
+  - TLS_CHACHA20_POLY1305_SHA256
+  - TLS_AES_128_CCM_SHA256
+  - TLS_AES_128_CCM_8_SHA256
+
+  Example:
+          ciphers ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-RSA-AES128-GCM-SHA256
+          ciphersuites TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:TLS_AES_128_GCM_SHA256
 
 crl-file <crlfile>
   This setting is only available when support for OpenSSL was built in. It

@@ -1375,7 +1375,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 				return 0;
 			}
 
-			if (txn->flags & TX_NOT_FIRST)
+			if (s->flags & SF_SRV_REUSED)
 				goto abort_keep_alive;
 
 			_HA_ATOMIC_INC(&s->be->be_counters.failed_resp);
@@ -1468,7 +1468,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 				}
 			}
 
-			if (txn->flags & TX_NOT_FIRST)
+			if (s->flags & SF_SRV_REUSED)
 				goto abort_keep_alive;
 
 			_HA_ATOMIC_INC(&s->be->be_counters.failed_resp);
@@ -1493,7 +1493,7 @@ int http_wait_for_response(struct stream *s, struct channel *rep, int an_bit)
 
 		/* 5: write error to client (we don't send any message then) */
 		else if (rep->flags & CF_WRITE_ERROR) {
-			if (txn->flags & TX_NOT_FIRST)
+			if (s->flags & SF_SRV_REUSED)
 				goto abort_keep_alive;
 
 			_HA_ATOMIC_INC(&s->be->be_counters.failed_resp);

@@ -650,16 +650,21 @@ void pool_flush(struct pool_head *pool)
 	 * replaces it with a NULL. Then the list can be released.
 	 */
 	next = pool->free_list;
-	do {
+	while (1) {
 		while (unlikely(next == POOL_BUSY)) {
 			__ha_cpu_relax();
 			next = _HA_ATOMIC_LOAD(&pool->free_list);
 		}
+
 		if (next == NULL)
-			return;
-	} while (unlikely((next = _HA_ATOMIC_XCHG(&pool->free_list, POOL_BUSY)) == POOL_BUSY));
-	_HA_ATOMIC_STORE(&pool->free_list, NULL);
-	__ha_barrier_atomic_store();
+			break;
+
+		next = _HA_ATOMIC_XCHG(&pool->free_list, POOL_BUSY);
+		if (next != POOL_BUSY) {
+			HA_ATOMIC_STORE(&pool->free_list, NULL);
+			break;
+		}
+	}
 
 	while (next) {
 		temp = next;

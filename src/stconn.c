@@ -14,6 +14,7 @@
 #include <haproxy/applet.h>
 #include <haproxy/connection.h>
 #include <haproxy/check.h>
+#include <haproxy/filters.h>
 #include <haproxy/http_ana.h>
 #include <haproxy/pipe.h>
 #include <haproxy/pool.h>
@@ -1186,6 +1187,7 @@ static void sc_notify(struct stconn *sc)
 	 */
 	if (!channel_is_empty(ic) &&
 	    sc_ep_test(sco, SE_FL_WAIT_DATA) &&
+	     (!HAS_DATA_FILTERS(__sc_strm(sc), ic) || channel_input_data(ic) == 0) &&
 	    (!(ic->flags & CF_EXPECT_MORE) || channel_full(ic, co_data(ic)) || channel_input_data(ic) == 0)) {
 		int new_len, last_len;
 

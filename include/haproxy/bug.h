@@ -53,12 +53,30 @@ static inline __attribute((always_inline)) void ha_crash_now(void)
 #if __GNUC_PREREQ__(5, 0)
 #pragma GCC diagnostic pop
 #endif
+	DO_NOT_FOLD();
 	my_unreachable();
 }
 
 #ifdef DEBUG_USE_ABORT
 /* abort() is better recognized by code analysis tools */
-#define ABORT_NOW() do { DUMP_TRACE(); abort(); } while (0)
+
+/* abort() is generally tagged noreturn, so there's no 100% safe way to prevent
+ * the compiler from doing a tail-merge here. Tests show that stopping folding
+ * just before calling abort() does work in practice at -O2, increasing the
+ * number of abort() calls in h3.o from 18 to 26, probably because there's no
+ * more savings to be made by replacing a call with a jump. However, as -Os it
+ * drops to 5 regardless of the build option. In order to help here, instead we
+ * wrap abort() into another function, with the line number stored into a local
+ * variable on the stack and we pretend to use it, so that unwinding the stack
+ * from abort() will reveal its value even if the call was folded.
+ */
+static __attribute__((noinline,noreturn,unused)) void abort_with_line(uint line)
+{
+	DISGUISE(&line);
+	abort();
+}
+
+#define ABORT_NOW() do { DUMP_TRACE(); abort_with_line(__LINE__); } while (0)
 #else
 /* More efficient than abort() because it does not mangle the
  * stack and stops at the exact location we need.
@@ -117,7 +135,7 @@ static inline __attribute((always_inline)) void ha_crash_now(void)
  */
 
 /* The macros below are for general use */
-#if defined(DEBUG_STRICT)
+#if defined(DEBUG_STRICT) && (DEBUG_STRICT > 0)
 # if defined(DEBUG_STRICT_ACTION) && (DEBUG_STRICT_ACTION < 1)
 /* Lowest level: BUG_ON() warns, WARN_ON() warns, CHECK_IF() warns */
 #  define BUG_ON(cond)       _BUG_ON     (cond, __FILE__, __LINE__, 2, "WARNING: bug ",   " (not crashing but process is untrusted now, please report to developers)")
@@ -140,9 +158,9 @@ static inline __attribute((always_inline)) void ha_crash_now(void)
 #  define CHECK_IF(cond)     _BUG_ON_ONCE(cond, __FILE__, __LINE__, 1, "FATAL: check ",   "")
 # endif
 #else
-#  define BUG_ON(cond)       do { } while (0)
-#  define WARN_ON(cond)      do { } while (0)
-#  define CHECK_IF(cond)     do { } while (0)
+#  define BUG_ON(cond)       do { (void)sizeof(cond); } while (0)
+#  define WARN_ON(cond)      do { (void)sizeof(cond); } while (0)
+#  define CHECK_IF(cond)     do { (void)sizeof(cond); } while (0)
 #endif
 
 /* These macros are only for hot paths and remain disabled unless DEBUG_STRICT is 2 or above.
@@ -164,8 +182,8 @@ static inline __attribute((always_inline)) void ha_crash_now(void)
 #  define CHECK_IF_HOT(cond) _BUG_ON_ONCE(cond, __FILE__, __LINE__, 1, "FATAL: check ",   "")
 # endif
 #else
-#  define BUG_ON_HOT(cond)   do { } while (0)
-#  define CHECK_IF_HOT(cond) do { } while (0)
+#  define BUG_ON_HOT(cond)   do { (void)sizeof(cond); } while (0)
+#  define CHECK_IF_HOT(cond) do { (void)sizeof(cond); } while (0)
 #endif
 
 

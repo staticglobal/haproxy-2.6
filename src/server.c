@@ -478,6 +478,10 @@ static int srv_parse_disabled(char **args, int *cur_arg,
 static int srv_parse_enabled(char **args, int *cur_arg,
                              struct proxy *curproxy, struct server *newsrv, char **err)
 {
+	if (newsrv->flags & SRV_F_DYNAMIC) {
+		return 0;
+	}
+
 	newsrv->next_admin &= ~SRV_ADMF_CMAINT & ~SRV_ADMF_FMAINT;
 	newsrv->next_state = SRV_ST_RUNNING;
 	newsrv->check.state &= ~CHK_ST_PAUSED;
@@ -1771,7 +1775,7 @@ void srv_compute_all_admin_states(struct proxy *px)
  */
 static struct srv_kw_list srv_kws = { "ALL", { }, {
 	{ "backup",              srv_parse_backup,              0,  1,  1 }, /* Flag as backup server */
-	{ "cookie",              srv_parse_cookie,              1,  1,  0 }, /* Assign a cookie to the server */
+	{ "cookie",              srv_parse_cookie,              1,  1,  1 }, /* Assign a cookie to the server */
 	{ "disabled",            srv_parse_disabled,            0,  1,  1 }, /* Start the server in 'disabled' state */
 	{ "enabled",             srv_parse_enabled,             0,  1,  1 }, /* Start the server in 'enabled' state */
 	{ "error-limit",         srv_parse_error_limit,         1,  1,  1 }, /* Configure the consecutive count of check failures to consider a server on error */
@@ -1831,15 +1835,17 @@ void server_recalc_eweight(struct server *sv, int must_update)
 	unsigned w;
 
 	if (now.tv_sec < sv->last_change || now.tv_sec >= sv->last_change + sv->slowstart) {
-		/* go to full throttle if the slowstart interval is reached */
-		if (sv->next_state == SRV_ST_STARTING)
+		/* go to full throttle if the slowstart interval is reached unless server is currently down */
+		if ((sv->cur_state != SRV_ST_STOPPED) && (sv->next_state == SRV_ST_STARTING))
 			sv->next_state = SRV_ST_RUNNING;
 	}
 
 	/* We must take care of not pushing the server to full throttle during slow starts.
 	 * It must also start immediately, at least at the minimal step when leaving maintenance.
 	 */
-	if ((sv->next_state == SRV_ST_STARTING) && (px->lbprm.algo & BE_LB_PROP_DYN))
+	if ((sv->cur_state == SRV_ST_STOPPED) && (sv->next_state == SRV_ST_STARTING) && (px->lbprm.algo & BE_LB_PROP_DYN))
+		w = 1;
+	else if ((sv->next_state == SRV_ST_STARTING) && (px->lbprm.algo & BE_LB_PROP_DYN))
 		w = (px->lbprm.wdiv * (now.tv_sec - sv->last_change) + sv->slowstart) / sv->slowstart;
 	else
 		w = px->lbprm.wdiv;
@@ -2052,8 +2058,10 @@ static void srv_conn_src_cpy(struct server *srv, const struct server *src)
 	srv->conn_src.bind_hdr_occ = src->conn_src.bind_hdr_occ;
 	srv->conn_src.tproxy_addr  = src->conn_src.tproxy_addr;
 #endif
-	if (src->conn_src.iface_name != NULL)
+	if (src->conn_src.iface_name != NULL) {
 		srv->conn_src.iface_name = strdup(src->conn_src.iface_name);
+		srv->conn_src.iface_len = src->conn_src.iface_len;
+	}
 }
 
 /*
@@ -4889,6 +4897,9 @@ static int cli_parse_add_server(char **args, char *payload, struct appctx *appct
 			ha_alert("System might be unstable, consider to execute a reload");
 	}
 
+	if (srv->cklen && be->mode != PR_MODE_HTTP)
+		ha_warning("Ignoring cookie as HTTP mode is disabled.\n");
+
 	ha_notice("New server registered.\n");
 	cli_msg(appctx, LOG_INFO, usermsgs_str());
 
@@ -4995,7 +5006,7 @@ static int cli_parse_delete_server(char **args, char *payload, struct appctx *ap
 	 * TODO idle connections should not prevent server deletion. A proper
 	 * cleanup function should be implemented to be used here.
 	 */
-	if (srv->cur_sess || srv->curr_idle_conns ||
+	if (srv->curr_used_conns || srv->curr_idle_conns ||
 	    !eb_is_empty(&srv->queue.head) || srv_has_streams(srv)) {
 		cli_err(appctx, "Server still has connections attached to it, cannot remove it.");
 		goto out;

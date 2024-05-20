@@ -530,7 +530,7 @@ struct stream *stream_new(struct session *sess, struct stconn *sc, struct buffer
 	s->res.analyse_exp = TICK_ETERNITY;
 
 	s->txn = NULL;
-	s->hlua = NULL;
+	s->hlua[0] = s->hlua[1] = NULL;
 
 	s->resolv_ctx.requester = NULL;
 	s->resolv_ctx.hostname_dn = NULL;
@@ -646,8 +646,10 @@ void stream_free(struct stream *s)
 	flt_stream_stop(s);
 	flt_stream_release(s, 0);
 
-	hlua_ctx_destroy(s->hlua);
-	s->hlua = NULL;
+	hlua_ctx_destroy(s->hlua[0]);
+	hlua_ctx_destroy(s->hlua[1]);
+	s->hlua[0] = s->hlua[1] = NULL;
+
 	if (s->txn)
 		http_destroy_txn(s);
 
@@ -2681,6 +2683,20 @@ void stream_update_time_stats(struct stream *s)
 void sess_change_server(struct stream *strm, struct server *newsrv)
 {
 	struct server *oldsrv = strm->srv_conn;
+
+	/* Dynamic servers may be deleted during process lifetime. This
+	 * operation is always conducted under thread isolation. Several
+	 * conditions prevent deletion, one of them is if server streams list
+	 * is not empty. sess_change_server() uses stream_add_srv_conn() to
+	 * ensure the latter condition.
+	 *
+	 * A race condition could exist for stream which referenced a server
+	 * instance (s->target) without registering itself in its server list.
+	 * This is notably the case for SF_DIRECT streams which referenced a
+	 * server earlier during process_stream(). However at this time the
+	 * code is deemed safe as process_stream() cannot be rescheduled before
+	 * invocation of sess_change_server().
+	 */
 
 	if (oldsrv == newsrv)
 		return;

@@ -71,8 +71,9 @@
 /* used only for keep-alive purposes, to indicate we're on a second transaction */
 #define TX_NOT_FIRST	0x00040000	/* the transaction is not the first one */
 
-#define TX_L7_RETRY     0x000800000     /* The transaction may attempt L7 retries */
-#define TX_D_L7_RETRY   0x001000000     /* Disable L7 retries on this transaction, even if configured to do it */
+#define TX_L7_RETRY     0x00080000      /* The transaction may attempt L7 retries */
+#define TX_D_L7_RETRY   0x00100000      /* Disable L7 retries on this transaction, even if configured to do it */
+
 /*
  * HTTP message status flags (msg->flags)
  */

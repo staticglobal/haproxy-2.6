@@ -44,6 +44,7 @@
 #define APPCTX_CLI_ST1_PROMPT  (1 << 0)
 #define APPCTX_CLI_ST1_PAYLOAD (1 << 1)
 #define APPCTX_CLI_ST1_NOLF    (1 << 2)
+#define APPCTX_CLI_ST1_SHUT_EXPECTED  (1 << 4)
 
 #define CLI_PREFIX_KW_NB 5
 #define CLI_MAX_MATCHES 5

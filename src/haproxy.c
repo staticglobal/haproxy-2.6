@@ -1,6 +1,6 @@
 /*
  * HAProxy : High Availability-enabled HTTP/TCP proxy
- * Copyright 2000-2023 Willy Tarreau <willy@haproxy.org>.
+ * Copyright 2000-2024 Willy Tarreau <willy@haproxy.org>.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -209,6 +209,7 @@ struct global global = {
 		.quic_backend_max_idle_timeout = QUIC_TP_DFLT_BACK_MAX_IDLE_TIMEOUT,
 		.quic_frontend_max_idle_timeout = QUIC_TP_DFLT_FRONT_MAX_IDLE_TIMEOUT,
 		.quic_frontend_max_streams_bidi = QUIC_TP_DFLT_FRONT_MAX_STREAMS_BIDI,
+		.quic_reorder_ratio = QUIC_DFLT_REORDER_RATIO,
 		.quic_retry_threshold = QUIC_DFLT_RETRY_THRESHOLD,
 		.quic_streams_buf = 30,
 #endif /* USE_QUIC */
@@ -2244,6 +2245,10 @@ static void init(int argc, char **argv)
 	if (global.mode & MODE_DUMP_KWD)
 		dump_registered_keywords();
 
+	if (global.mode & MODE_DIAG) {
+		cfg_run_diagnostics();
+	}
+
 	if (global.mode & MODE_CHECK) {
 		struct peers *pr;
 		struct proxy *px;
@@ -2273,10 +2278,6 @@ static void init(int argc, char **argv)
 		}
 		qfprintf(stdout, "Configuration file has no error but will not start (no listener) => exit(2).\n");
 		exit(2);
-	}
-
-	if (global.mode & MODE_DIAG) {
-		cfg_run_diagnostics();
 	}
 
 	/* Initialize the random generators */

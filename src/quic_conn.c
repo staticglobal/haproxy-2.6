@@ -3154,6 +3154,14 @@ static int qc_parse_pkt_frms(struct quic_conn *qc, struct quic_rx_packet *pkt,
 			if (qc_is_listener(qc)) {
 				TRACE_ERROR("non accepted QUIC_FT_HANDSHAKE_DONE frame",
 				            QUIC_EV_CONN_PRSHPKT, qc);
+
+				/* RFC 9000 19.20. HANDSHAKE_DONE Frames
+				 *
+				 * A
+				 * server MUST treat receipt of a HANDSHAKE_DONE frame as a connection
+				 * error of type PROTOCOL_VIOLATION.
+				 */
+				quic_set_connection_close(qc, quic_err_transport(QC_ERR_PROTOCOL_VIOLATION));
 				goto leave;
 			}
 
@@ -3973,12 +3981,12 @@ struct quic_arng_node *quic_insert_new_range(struct quic_conn *qc,
 	TRACE_ENTER(QUIC_EV_CONN_RXPKT, qc);
 
 	if (arngs->sz >= QUIC_MAX_ACK_RANGES) {
-		struct eb64_node *last;
+		struct eb64_node *first;
 
-		last = eb64_last(&arngs->root);
-		BUG_ON(last == NULL);
-		eb64_delete(last);
-		pool_free(pool_head_quic_arng, last);
+		first = eb64_first(&arngs->root);
+		BUG_ON(first == NULL);
+		eb64_delete(first);
+		pool_free(pool_head_quic_arng, first);
 		arngs->sz--;
 	}
 
@@ -4769,7 +4777,7 @@ void quic_cstream_free(struct quic_cstream *cs)
 
 	quic_free_ncbuf(&cs->rx.ncbuf);
 
-	qc_stream_desc_release(cs->desc);
+	qc_stream_desc_release(cs->desc, 0);
 	pool_free(pool_head_quic_cstream, cs);
 }
 

@@ -10,7 +10,7 @@
 #include <string.h>
 
 #include <import/eb64tree.h>
-#include <haproxy/quic_conn-t.h>
+#include <haproxy/quic_conn.h>
 #include <haproxy/quic_enc.h>
 #include <haproxy/quic_frame.h>
 #include <haproxy/quic_tp-t.h>
@@ -1104,7 +1104,13 @@ int qc_parse_frm(struct quic_frame *frm, struct quic_rx_packet *pkt,
 
 	frm->type = *(*buf)++;
 	if (frm->type >= QUIC_FT_MAX) {
+		/* RFC 9000 12.4. Frames and Frame Types
+		 *
+		 * An endpoint MUST treat the receipt of a frame of unknown type as a
+		 * connection error of type FRAME_ENCODING_ERROR.
+		 */
 		TRACE_DEVEL("wrong frame type", QUIC_EV_CONN_PRSFRM, qc, frm);
+		quic_set_connection_close(qc, quic_err_transport(QC_ERR_FRAME_ENCODING_ERROR));
 		goto leave;
 	}
 

@@ -67,6 +67,8 @@ static const struct trace_event h3_trace_events[] = {
 	{ .mask = H3_EV_H3S_NEW,      .name = "h3s_new",     .desc = "new H3 stream" },
 #define           H3_EV_H3S_END       (1ULL <<  8)
 	{ .mask = H3_EV_H3S_END,      .name = "h3s_end",     .desc = "H3 stream terminated" },
+#define           H3_EV_STRM_SEND     (1ULL << 12)
+	{ .mask = H3_EV_STRM_SEND,    .name = "strm_send",   .desc = "sending data for stream" },
 	{ }
 };
 
@@ -1177,7 +1179,7 @@ static int h3_control_send(struct qcs *qcs, void *ctx)
 	}
 
 	res = mux_get_buf(qcs);
-	if (!res) {
+	if (b_is_null(res)) {
 		TRACE_ERROR("cannot allocate Tx buffer", H3_EV_TX_SETTINGS, qcs->qcc->conn, qcs);
 		goto err;
 	}
@@ -1257,7 +1259,7 @@ static int h3_resp_headers_send(struct qcs *qcs, struct htx *htx)
 	list[hdr].n = ist("");
 
 	res = mux_get_buf(qcs);
-	if (!res) {
+	if (b_is_null(res)) {
 		TRACE_ERROR("cannot allocate Tx buffer", H3_EV_TX_HDR, qcs->qcc->conn, qcs);
 		h3c->err = H3_INTERNAL_ERROR;
 		goto err;
@@ -1274,8 +1276,11 @@ static int h3_resp_headers_send(struct qcs *qcs, struct htx *htx)
 
 	if (qpack_encode_field_section_line(&headers_buf))
 		ABORT_NOW();
-	if (qpack_encode_int_status(&headers_buf, status))
-		ABORT_NOW();
+	if (qpack_encode_int_status(&headers_buf, status)) {
+		TRACE_ERROR("invalid status code", H3_EV_TX_HDR, qcs->qcc->conn, qcs);
+		h3c->err = H3_INTERNAL_ERROR;
+		goto err;
+	}
 
 	for (hdr = 0; hdr < sizeof(list) / sizeof(list[0]); ++hdr) {
 		if (isteq(list[hdr].n, ist("")))
@@ -1361,7 +1366,7 @@ static int h3_resp_data_send(struct qcs *qcs, struct htx *htx, size_t count)
 		goto end;
 
 	res = mux_get_buf(qcs);
-	if (!res) {
+	if (b_is_null(res)) {
 		TRACE_ERROR("cannot allocate Tx buffer", H3_EV_TX_DATA, qcs->qcc->conn, qcs);
 		h3c->err = H3_INTERNAL_ERROR;
 		goto err;
@@ -1432,7 +1437,7 @@ static size_t h3_snd_buf(struct qcs *qcs, struct htx *htx, size_t count)
 	int32_t idx;
 	int ret = 0;
 
-	h3_debug_printf(stderr, "%s\n", __func__);
+	TRACE_ENTER(H3_EV_STRM_SEND, qcs->qcc->conn, qcs);
 
 	while (count && !htx_is_empty(htx) &&
 	       !(qcs->flags & QC_SF_BLK_MROOM) && !h3c->err) {
@@ -1490,6 +1495,7 @@ static size_t h3_snd_buf(struct qcs *qcs, struct htx *htx, size_t count)
 	}
 
  out:
+	TRACE_LEAVE(H3_EV_STRM_SEND, qcs->qcc->conn, qcs);
 	return total;
 }
 
@@ -1610,7 +1616,7 @@ static int h3_send_goaway(struct h3c *h3c)
 	b_quic_enc_int(&pos, h3c->id_goaway);
 
 	res = mux_get_buf(qcs);
-	if (!res || b_room(res) < b_data(&pos)) {
+	if (b_is_null(res) || b_room(res) < b_data(&pos)) {
 		/* Do not try forcefully to emit GOAWAY if no space left. */
 		return 1;
 	}

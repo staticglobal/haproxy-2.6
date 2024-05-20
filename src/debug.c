@@ -262,7 +262,9 @@ void ha_task_dump(struct buffer *buf, const struct task *task, const char *pfx)
 
 #ifdef USE_LUA
 	hlua = NULL;
-	if (s && (hlua = s->hlua)) {
+	if (s && ((s->hlua[0] && HLUA_IS_BUSY(s->hlua[0])) ||
+	    (s->hlua[1] && HLUA_IS_BUSY(s->hlua[1])))) {
+		hlua = (s->hlua[0] && HLUA_IS_BUSY(s->hlua[0])) ? s->hlua[0] : s->hlua[1];
 		chunk_appendf(buf, "%sCurrent executing Lua from a stream analyser -- ", pfx);
 	}
 	else if (task->process == hlua_process_task && (hlua = task->context)) {
@@ -942,7 +944,7 @@ static int debug_parse_cli_sched(char **args, char *payload, struct appctx *appc
 			*(uint8_t *)ptr = new;
 	}
 
-	tctx = calloc(sizeof(*tctx), count + 2);
+	tctx = calloc(count + 2, sizeof(*tctx));
 	if (!tctx)
 		goto fail;
 

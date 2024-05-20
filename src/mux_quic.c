@@ -74,7 +74,7 @@ static void qcs_free(struct qcs *qcs)
 		qcc->app_ops->detach(qcs);
 
 	/* Release qc_stream_desc buffer from quic-conn layer. */
-	qc_stream_desc_release(qcs->stream);
+	qc_stream_desc_release(qcs->stream, qcs->tx.sent_offset);
 
 	/* Free Rx/Tx buffers. */
 	qc_free_ncbuf(qcs, &qcs->rx.ncbuf);
@@ -623,6 +623,19 @@ struct stconn *qc_attach_sc(struct qcs *qcs, struct buffer *buf, char fin)
 	if (fin) {
 		TRACE_STATE("report end-of-input", QMUX_EV_STRM_RECV, qcc->conn, qcs);
 		se_fl_set(qcs->sd, SE_FL_EOI);
+	}
+
+	/* A QCS can be already locally closed before stream layer
+	 * instantiation. This notably happens if STOP_SENDING was the first
+	 * frame received for this instance. In this case, an error is
+	 * immediately to the stream layer to prevent transmission.
+	 *
+	 * TODO it could be better to not instantiate at all the stream layer.
+	 * However, extra care is required to ensure QCS instance is released.
+	 */
+	if (unlikely(qcs_is_close_local(qcs) || (qcs->flags & QC_SF_TO_RESET))) {
+		TRACE_STATE("report early error", QMUX_EV_STRM_RECV, qcc->conn, qcs);
+		se_fl_set_error(qcs->sd);
 	}
 
 	return qcs->sd->sc;
@@ -1914,20 +1927,20 @@ static void qc_release(struct qcc *qcc)
 		qcc->task = NULL;
 	}
 
-	if (qcc->wait_event.tasklet)
-		tasklet_free(qcc->wait_event.tasklet);
-	if (conn && qcc->wait_event.events) {
-		conn->xprt->unsubscribe(conn, conn->xprt_ctx,
-		                        qcc->wait_event.events,
-		                        &qcc->wait_event);
-	}
-
 	/* liberate remaining qcs instances */
 	node = eb64_first(&qcc->streams_by_id);
 	while (node) {
 		struct qcs *qcs = eb64_entry(node, struct qcs, by_id);
 		node = eb64_next(node);
 		qcs_free(qcs);
+	}
+
+	if (qcc->wait_event.tasklet)
+		tasklet_free(qcc->wait_event.tasklet);
+	if (conn && qcc->wait_event.events) {
+		conn->xprt->unsubscribe(conn, conn->xprt_ctx,
+		                        qcc->wait_event.events,
+		                        &qcc->wait_event);
 	}
 
 	while (!LIST_ISEMPTY(&qcc->lfctl.frms)) {

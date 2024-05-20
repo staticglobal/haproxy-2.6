@@ -1082,6 +1082,8 @@ int get_log_facility(const char *fac)
  * When using the +E log format option, it will try to escape '"\]'
  * characters with '\' as prefix. The same prefix should not be used as
  * <escape>.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 static char *lf_encode_string(char *start, char *stop,
                               const char escape, const long *map,
@@ -1112,13 +1114,14 @@ static char *lf_encode_string(char *start, char *stop,
 				string++;
 			}
 			*start = '\0';
+			return start;
 		}
 	}
 	else {
 		return encode_string(start, stop, escape, map, string);
 	}
 
-	return start;
+	return NULL;
 }
 
 /*
@@ -1127,6 +1130,8 @@ static char *lf_encode_string(char *start, char *stop,
  * When using the +E log format option, it will try to escape '"\]'
  * characters with '\' as prefix. The same prefix should not be used as
  * <escape>.
+ *
+ * Return the address of the \0 character, or NULL on error
  */
 static char *lf_encode_chunk(char *start, char *stop,
                              const char escape, const long *map,
@@ -1162,13 +1167,14 @@ static char *lf_encode_chunk(char *start, char *stop,
 				str++;
 			}
 			*start = '\0';
+			return start;
 		}
 	}
 	else {
 		return encode_chunk(start, stop, escape, map, chunk);
 	}
 
-	return start;
+	return NULL;
 }
 
 /*
@@ -1189,13 +1195,12 @@ char *lf_text_len(char *dst, const char *src, size_t len, size_t size, const str
 
 	if (src && len) {
 		/* escape_string and strlcpy2 will both try to add terminating NULL-byte
-		 * to dst, so we need to make sure that extra byte will fit into dst
-		 * before calling them
+		 * to dst
 		 */
 		if (node->options & LOG_OPT_ESC) {
 			char *ret;
 
-			ret = escape_string(dst, (dst + size - 1), '\\', rfc5424_escape_map, src, src + len);
+			ret = escape_string(dst, dst + size, '\\', rfc5424_escape_map, src, src + len);
 			if (ret == NULL || *ret != '\0')
 				return NULL;
 			len = ret - dst;
@@ -1257,7 +1262,7 @@ char *lf_ip(char *dst, const struct sockaddr *sockaddr, size_t size, const struc
 		default:
 			return NULL;
 		}
-		if (iret < 0 || iret > size)
+		if (iret < 0 || iret >= size)
 			return NULL;
 		ret += iret;
 	} else {
@@ -1281,7 +1286,7 @@ char *lf_port(char *dst, const struct sockaddr *sockaddr, size_t size, const str
 	if (node->options & LOG_OPT_HEXA) {
 		const unsigned char *port = (const unsigned char *)&((struct sockaddr_in *)sockaddr)->sin_port;
 		iret = snprintf(dst, size, "%02X%02X", port[0], port[1]);
-		if (iret < 0 || iret > size)
+		if (iret < 0 || iret >= size)
 			return NULL;
 		ret += iret;
 	} else {
@@ -2122,7 +2127,7 @@ int sess_build_logline(struct session *sess, struct stream *s, char *dst, size_t
 							  key ? key->data.u.str.data : 0,
 							  dst + maxsize - tmplog,
 							  tmp);
-				if (ret == 0)
+				if (ret == NULL)
 					goto out;
 				tmplog = ret;
 				last_isspace = 0;
@@ -2299,7 +2304,7 @@ int sess_build_logline(struct session *sess, struct stream *s, char *dst, size_t
 			case LOG_FMT_TS: // %Ts
 				if (tmp->options & LOG_OPT_HEXA) {
 					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", (unsigned int)logs->accept_date.tv_sec);
-					if (iret < 0 || iret > dst + maxsize - tmplog)
+					if (iret < 0 || iret >= dst + maxsize - tmplog)
 						goto out;
 					last_isspace = 0;
 					tmplog += iret;
@@ -2315,7 +2320,7 @@ int sess_build_logline(struct session *sess, struct stream *s, char *dst, size_t
 			case LOG_FMT_MS: // %ms
 			if (tmp->options & LOG_OPT_HEXA) {
 					iret = snprintf(tmplog, dst + maxsize - tmplog, "%02X",(unsigned int)logs->accept_date.tv_usec/1000);
-					if (iret < 0 || iret > dst + maxsize - tmplog)
+					if (iret < 0 || iret >= dst + maxsize - tmplog)
 						goto out;
 					last_isspace = 0;
 					tmplog += iret;
@@ -3000,7 +3005,7 @@ int sess_build_logline(struct session *sess, struct stream *s, char *dst, size_t
 			case LOG_FMT_COUNTER: // %rt
 				if (tmp->options & LOG_OPT_HEXA) {
 					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", uniq_id);
-					if (iret < 0 || iret > dst + maxsize - tmplog)
+					if (iret < 0 || iret >= dst + maxsize - tmplog)
 						goto out;
 					last_isspace = 0;
 					tmplog += iret;
@@ -3016,7 +3021,7 @@ int sess_build_logline(struct session *sess, struct stream *s, char *dst, size_t
 			case LOG_FMT_LOGCNT: // %lc
 				if (tmp->options & LOG_OPT_HEXA) {
 					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", fe->log_count);
-					if (iret < 0 || iret > dst + maxsize - tmplog)
+					if (iret < 0 || iret >= dst + maxsize - tmplog)
 						goto out;
 					last_isspace = 0;
 					tmplog += iret;
@@ -3041,7 +3046,7 @@ int sess_build_logline(struct session *sess, struct stream *s, char *dst, size_t
 			case LOG_FMT_PID: // %pid
 				if (tmp->options & LOG_OPT_HEXA) {
 					iret = snprintf(tmplog, dst + maxsize - tmplog, "%04X", pid);
-					if (iret < 0 || iret > dst + maxsize - tmplog)
+					if (iret < 0 || iret >= dst + maxsize - tmplog)
 						goto out;
 					last_isspace = 0;
 					tmplog += iret;

@@ -405,7 +405,7 @@ struct timer *insert_timer(struct eb_root *r, struct timer **alloc, int v)
 	struct eb32_node *n;
 
 	if (!t) {
-		t = calloc(sizeof(*t), 1);
+		t = calloc(1, sizeof(*t));
 		if (unlikely(!t)) {
 			fprintf(stderr, "%s: not enough memory\n", __FUNCTION__);
 			exit(1);
@@ -433,7 +433,7 @@ struct timer *insert_value(struct eb_root *r, struct timer **alloc, int v)
 	struct eb32_node *n;
 
 	if (!t) {
-		t = calloc(sizeof(*t), 1);
+		t = calloc(1, sizeof(*t));
 		if (unlikely(!t)) {
 			fprintf(stderr, "%s: not enough memory\n", __FUNCTION__);
 			exit(1);
