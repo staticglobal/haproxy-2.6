@@ -1406,28 +1406,7 @@ void proxy_preset_defaults(struct proxy *defproxy)
 		defproxy->options2 |= PR_O2_INDEPSTR;
 	defproxy->max_out_conns = MAX_SRV_LIST;
 
-	defproxy->defsrv.check.inter = DEF_CHKINTR;
-	defproxy->defsrv.check.fastinter = 0;
-	defproxy->defsrv.check.downinter = 0;
-	defproxy->defsrv.agent.inter = DEF_CHKINTR;
-	defproxy->defsrv.agent.fastinter = 0;
-	defproxy->defsrv.agent.downinter = 0;
-	defproxy->defsrv.check.rise = DEF_RISETIME;
-	defproxy->defsrv.check.fall = DEF_FALLTIME;
-	defproxy->defsrv.agent.rise = DEF_AGENT_RISETIME;
-	defproxy->defsrv.agent.fall = DEF_AGENT_FALLTIME;
-	defproxy->defsrv.check.port = 0;
-	defproxy->defsrv.agent.port = 0;
-	defproxy->defsrv.maxqueue = 0;
-	defproxy->defsrv.minconn = 0;
-	defproxy->defsrv.maxconn = 0;
-	defproxy->defsrv.max_reuse = -1;
-	defproxy->defsrv.max_idle_conns = -1;
-	defproxy->defsrv.pool_purge_delay = 5000;
-	defproxy->defsrv.slowstart = 0;
-	defproxy->defsrv.onerror = DEF_HANA_ONERR;
-	defproxy->defsrv.consecutive_errors_limit = DEF_HANA_ERRLIMIT;
-	defproxy->defsrv.uweight = defproxy->defsrv.iweight = 1;
+	srv_settings_init(&defproxy->defsrv);
 
 	defproxy->email_alert.level = LOG_ALERT;
 	defproxy->load_server_state_from_file = PR_SRV_STATE_FILE_UNSPEC;
@@ -1816,19 +1795,13 @@ static int proxy_defproxy_cpy(struct proxy *curproxy, const struct proxy *defpro
 
 	/* copy default logsrvs to curproxy */
 	list_for_each_entry(tmplogsrv, &defproxy->logsrvs, list) {
-		struct logsrv *node = malloc(sizeof(*node));
+		struct logsrv *node = dup_logsrv(tmplogsrv);
 
 		if (!node) {
 			memprintf(errmsg, "proxy '%s': out of memory", curproxy->id);
 			return 1;
 		}
-		memcpy(node, tmplogsrv, sizeof(struct logsrv));
-		node->ref = tmplogsrv->ref;
-		LIST_INIT(&node->list);
 		LIST_APPEND(&curproxy->logsrvs, &node->list);
-		node->ring_name = tmplogsrv->ring_name ? strdup(tmplogsrv->ring_name) : NULL;
-		node->conf.file = strdup(tmplogsrv->conf.file);
-		node->conf.line = tmplogsrv->conf.line;
 	}
 
 	curproxy->conf.uniqueid_format_string = defproxy->conf.uniqueid_format_string;
@@ -1959,11 +1932,11 @@ void proxy_cond_disable(struct proxy *p)
 	 */
 	if (p->mode == PR_MODE_TCP || p->mode == PR_MODE_HTTP || p->mode == PR_MODE_SYSLOG)
 		ha_warning("Proxy %s stopped (cumulated conns: FE: %lld, BE: %lld).\n",
-			   p->id, p->fe_counters.cum_conn, p->be_counters.cum_conn);
+			   p->id, p->fe_counters.cum_conn, p->be_counters.cum_sess);
 
 	if (p->mode == PR_MODE_TCP || p->mode == PR_MODE_HTTP)
 		send_log(p, LOG_WARNING, "Proxy %s stopped (cumulated conns: FE: %lld, BE: %lld).\n",
-			 p->id, p->fe_counters.cum_conn, p->be_counters.cum_conn);
+			 p->id, p->fe_counters.cum_conn, p->be_counters.cum_sess);
 
 	if (p->table && p->table->size && p->table->sync_task)
 		task_wakeup(p->table->sync_task, TASK_WOKEN_MSG);

@@ -3,7 +3,7 @@
                           Configuration Manual
                          ----------------------
                               version 2.6
-                              2024/04/05
+                              2024/06/18
 
 
 This document covers the configuration language as implemented in the version
@@ -200,7 +200,8 @@ carry the stream identifier.
 HTTP/3 is implemented over QUIC, itself implemented over UDP. QUIC solves the
 head of line blocking at transport level by means of independently treated
 streams. Indeed, when experiencing loss, an impacted stream does not affect the
-other streams.
+other streams. QUIC also provides connection migration support but currently
+haproxy does not support it.
 
 By default HAProxy operates in keep-alive mode with regards to persistent
 connections: for each connection it processes each request and response, and
@@ -1054,6 +1055,8 @@ The following keywords are supported in the "global" section :
    - h1-case-adjust-file
    - h2-workaround-bogus-websocket-clients
    - hard-stop-after
+   - harden.reject-privileged-ports.tcp
+   - harden.reject-privileged-ports.quic
    - insecure-fork-wanted
    - insecure-setuid-wanted
    - issuers-chain-path
@@ -1456,9 +1459,14 @@ fd-hard-limit <number>
   much RAM for regular usage. The fd-hard-limit setting is provided to enforce
   a possibly lower bound to this limit. This means that it will always respect
   the system-imposed limits when they are below <number> but the specified
-  value will be used if system-imposed limits are higher. In the example below,
-  no other setting is specified and the maxconn value will automatically adapt
-  to the lower of "fd-hard-limit" and the system-imposed limit:
+  value will be used if system-imposed limits are higher. By default
+  fd-hard-limit is set to 1048576. This default could be changed via
+  DEFAULT_MAXFD compile-time variable, that could serve as the maximum (kernel)
+  system limit, if RLIMIT_NOFILE hard limit is extremely large. fd-hard-limit
+  set in global section allows to temporarily override the value provided via
+  DEFAULT_MAXFD at the build-time. In the example below, no other setting is
+  specified and the maxconn value will automatically adapt to the lower of
+  "fd-hard-limit" and the RLIMIT_NOFILE limit:
 
       global
           # use as many FDs as possible but no more than 50000
@@ -1614,6 +1622,12 @@ hard-stop-after <time>
 
   See also: grace
 
+harden.reject-privileged-ports.tcp { on | off }
+harden.reject-privileged-ports.quic { on | off }
+  Toggle per protocol protection which forbid communication with clients which
+  use privileged ports as their source port. This range of ports is defined
+  according to RFC 6335. Protection is inactive by default on both protocols.
+
 insecure-fork-wanted
   By default HAProxy tries hard to prevent any thread and process creation
   after it starts. Doing so is particularly important when using Lua files of
@@ -1660,6 +1674,10 @@ issuers-chain-path <dir>
   chain if a file with IntermediateCA2+IntermediateCA1 is present in
   "issuers-chain-path" directory. All other certificates with the same issuer
   will share the chain in memory.
+
+  The OCSP features are not able to use the completed chain from
+  'issuers-chain-path', please use an additionnal .issuer file if you want to
+  achieve OCSP stapling.
 
 localpeer <name>
   Sets the local instance's peer name. It will be ignored if the "-L"
@@ -1872,10 +1890,18 @@ lua-prepend-path <string> [<type>]
 
 master-worker [no-exit-on-failure]
   Master-worker mode. It is equivalent to the command line "-W" argument.
-  This mode will launch a "master" which will monitor the "workers". Using
-  this mode, you can reload HAProxy directly by sending a SIGUSR2 signal to
-  the master. The master-worker mode is compatible either with the foreground
-  or daemon mode.
+
+  This mode will launch a "master" which will fork a "worker" after reading the
+  configuration to process the traffic. The master is used as a process manager
+  which will monitor the "workers".
+
+  Using this mode, you can reload HAProxy directly by sending a SIGUSR2 signal
+  to the master. Reloading will ask the master to read the configuration again
+  and fork a new worker. The previous worker will be kept until the end of its
+  jobs.
+
+  The master-worker mode is compatible either with the foreground or daemon
+  mode.
 
   By default, if a worker exits with a bad return code, in the case of a
   segfault for example, all workers will be killed, and the master will leave.
@@ -2018,7 +2044,7 @@ set-var-fmt <var-name> <fmt>
   are only those using internal data, typically 'int(value)' or 'str(value)'.
   It is possible to reference previously allocated variables as well. These
   variables will then be readable (and modifiable) from the regular rule sets.
-  Please see section 8.2.4 for details on the log-format syntax.
+  Please see section 8.2.6 for details on the custom log-format syntax.
 
   Example:
       global
@@ -2497,18 +2523,25 @@ maxcomprate <number>
 
 maxconn <number>
   Sets the maximum per-process number of concurrent connections to <number>. It
-  is equivalent to the command-line argument "-n". Proxies will stop accepting
-  connections when this limit is reached. The "ulimit-n" parameter is
-  automatically adjusted according to this value. See also "ulimit-n". Note:
-  the "select" poller cannot reliably use more than 1024 file descriptors on
-  some platforms. If your platform only supports select and reports "select
-  FAILED" on startup, you need to reduce maxconn until it works (slightly
-  below 500 in general). If this value is not set, it will automatically be
-  calculated based on the current file descriptors limit reported by the
-  "ulimit -n" command, possibly reduced to a lower value if a memory limit
-  is enforced, based on the buffer size, memory allocated to compression, SSL
-  cache size, and use or not of SSL and the associated maxsslconn (which can
-  also be automatic). In any case, the fd-hard-limit applies if set.
+  is equivalent to the command-line argument "-n". The value provided in
+  command-line argument via "-n" takes the precedence over the maxconn value set
+  in the global section. Haproxy process could be also compiled with
+  SYSTEM_MAXCONN compile-time variable, which is served in this case as the
+  system maxconn maximum. Again, the command-line "-n" argument allows at
+  runtime to bypass SYSTEM_MAXCONN limit, if set. Proxies will stop accepting
+  connections when maxconn is reached. The process soft file descriptor limit
+  (could be obtained with "ulimit -n" command) is automatically adjusted
+  according to provided maxconn. See also "ulimit-n". Note: the "select" poller
+  cannot reliably use more than 1024 file descriptors on some platforms. If your
+  platform only supports select and reports "select FAILED" on startup, you need
+  to reduce the maxconn until it works (slightly below 500 in general). If
+  maxconn value is not set, it will be automatically calculated based on the
+  current file descriptors limits, reported by the "ulimit -nH" command (we take
+  the maximum between the hard and soft values), then automatic value will be
+  possibly reduced by "fd-hard-limit" and by memory limit, if the latter was
+  enforced via "-m" command line option. Automatic value is also dependent from
+  the buffer size, memory allocated to compression, SSL cache size, and the use
+  or not of SSL and the associated maxsslconn (which can also be automatic).
 
   See also: fd-hard-limit, ulimit-n
 
@@ -5503,8 +5536,8 @@ error-log-format <string>
   connection errors described in section 8.2.5.
 
   If the directive is used in a defaults section, all subsequent frontends will
-  use the same log format. Please see section 8.2.4 which covers the log format
-  string in depth.
+  use the same log format. Please see section 8.2.6 which covers the custom log
+  format string in depth.
 
   "error-log-format" directive overrides previous "error-log-format"
   directives.
@@ -6353,7 +6386,7 @@ http-check set-var-fmt(<var-name>[,<cond>...]) <fmt>
     <expr>      Is a sample-fetch expression potentially followed by converters.
 
     <fmt>       This is the value expressed using log-format rules (see Custom
-                Log Format in section 8.2.4).
+                Log Format in section 8.2.6).
 
   Examples :
         http-check set-var(check.port) int(1234)
@@ -8006,7 +8039,11 @@ http-reuse { never | safe | aggressive | always }
   if it shares the same set of properties with the request.
 
   Also note that connections with certain bogus authentication schemes (relying
-  on the connection) like NTLM are marked private and never shared.
+  on the connection) like NTLM are marked private if possible and never shared.
+  This won't be the case however when using a protocol with multiplexing
+  abilities and using reuse mode level value greater than the default "safe"
+  strategy as in this case nothing prevents the connection from being already
+  shared.
 
   A connection pool is involved and configurable with "pool-max-conn".
 
@@ -8380,8 +8417,9 @@ log-format <string>
   This directive specifies the log format string that will be used for all logs
   resulting from traffic passing through the frontend using this line. If the
   directive is used in a defaults section, all subsequent frontends will use
-  the same log format. Please see section 8.2.4 which covers the log format
-  string in depth.
+  the same log format. Please see section 8.2.6 which covers the custom log
+  format string in depth.
+
   A specific log-format used only in case of connection error can also be
   defined, see the "error-log-format" option.
 
@@ -8396,7 +8434,7 @@ log-format-sd <string>
   This directive specifies the RFC5424 structured-data log format string that
   will be used for all logs resulting from traffic passing through the frontend
   using this line. If the directive is used in a defaults section, all
-  subsequent frontends will use the same log format. Please see section 8.2.4
+  subsequent frontends will use the same log format. Please see section 8.2.6
   which covers the log format string in depth.
 
   See https://tools.ietf.org/html/rfc5424#section-6.3 for more information
@@ -10561,7 +10599,7 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
     <loc>     With "redirect location", the exact value in <loc> is placed into
               the HTTP "Location" header. When used in an "http-request" rule,
               <loc> value follows the log-format rules and can include some
-              dynamic values (see Custom Log Format in section 8.2.4).
+              dynamic values (see Custom Log Format in section 8.2.6).
 
     <pfx>     With "redirect prefix", the "Location" header is built from the
               concatenation of <pfx> and the complete URI path, including the
@@ -10571,7 +10609,7 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
               redirect to the same URL (for instance, to insert a cookie). When
               used in an "http-request" rule, <pfx> value follows the log-format
               rules and can include some dynamic values (see Custom Log Format
-              in section 8.2.4).
+              in section 8.2.6).
 
     <sch>     With "redirect scheme", then the "Location" header is built by
               concatenating <sch> with "://" then the first occurrence of the
@@ -10583,7 +10621,7 @@ redirect scheme   <sch> [code <code>] <option> [{if | unless} <condition>]
               the same host. This directive is mostly used to redirect HTTP to
               HTTPS. When used in an "http-request" rule, <sch> value follows
               the log-format rules and can include some dynamic values (see
-              Custom Log Format in section 8.2.4).
+              Custom Log Format in section 8.2.6).
 
     <code>    The code is optional. It indicates which type of HTTP redirection
               is desired. Only codes 301, 302, 303, 307 and 308 are supported,
@@ -12515,7 +12553,7 @@ tcp-check set-var-fmt(<var-name>[,<cond>...]) <fmt>
     <expr>      Is a sample-fetch expression potentially followed by converters.
 
     <fmt>       This is the value expressed using log-format rules (see Custom
-                Log Format in section 8.2.4).
+                Log Format in section 8.2.6).
 
   Examples :
     tcp-check set-var(check.port) int(1234)
@@ -13634,14 +13672,47 @@ timeout http-keep-alive <timeout>
   There is also another difference between the two timeouts : when a connection
   expires during timeout http-keep-alive, no error is returned, the connection
   just closes. If the connection expires in "http-request" while waiting for a
-  connection to complete, a HTTP 408 error is returned.
+  request to complete, an HTTP 408 error is returned to the client before
+  closing the connection, unless "option http-ignore-probes" is set in the
+  frontend.
 
-  In general it is optimal to set this value to a few tens to hundreds of
-  milliseconds, to allow users to fetch all objects of a page at once but
-  without waiting for further clicks. Also, if set to a very small value (e.g.
-  1 millisecond) it will probably only accept pipelined requests but not the
-  non-pipelined ones. It may be a nice trade-off for very large sites running
-  with tens to hundreds of thousands of clients.
+  In general "timeout http-keep-alive" is best used to prevent clients from
+  holding open an otherwise idle connection too long on sites seeing large
+  amounts of short connections. This can be accomplished by setting the value
+  to a few tens to hundreds of milliseconds in HTTP/1.1. This will close the
+  connection after the client requests a page without having to hold that
+  connection open to wait for more activity from the client. In that scenario,
+  a new activity from the browser would result in a new handshake at the TCP
+  and/or SSL layer. A common use case for this is HTTP sites serving only a
+  redirect to the HTTPS page. Such connections are better not kept idle too
+  long because they won't be reused, unless maybe to fetch a favicon.
+
+  Another use case is the exact opposite: some sites want to permit clients
+  to reuse idle connections for a long time (e.g. 30 seconds to one minute) but
+  do not want to wait that long for the first request, in order to avoid a very
+  inexpensive attack vector. In this case, the http-keep-alive timeout would be
+  set to a large value, but http-request would remain low (a few seconds).
+
+  When set to a very small value additional requests that are not pipelined
+  are likely going to be handled over another connection unless the requests
+  are truly pipelined, which is very rare with HTTP/1.1 (requests being sent
+  back-to-back without waiting for a response). Most HTTP/1.1 implementations
+  send a request, wait for a response and then send another request. A small
+  value here for HTTP/1.1 may be advantageous to use less memory and sockets
+  for sites with hundreds of thousands of clients, at the expense of an
+  increase in handshake computation costs.
+
+  Special care should be taken with small values when dealing with HTTP/2. The
+  nature of HTTP/2 is to multiplex requests over a connection in order to save
+  on the overhead of reconnecting the TCP and/or SSL layers. The protocol also
+  uses control frames which cope poorly with early TCP connection closures, on
+  very rare occasions this may result in truncated responses when data are
+  destroyed in flight after leaving HAProxy (which then cannot even log an
+  error). A suggested low starting value for HTTP/2 connections would be around
+  4 seconds. This would prevent most modern keep-alive implementations from
+  needlessly holding open stale connections, and at the same time would allow
+  subsequent requests to reuse the connection. However, this should be adjusted
+  as needed and is simply a starting point.
 
   If this parameter is not set, the "http-request" timeout applies, and if both
   are not set, "timeout client" still applies at the lower level. It should be
@@ -14138,19 +14209,6 @@ backlog <backlog>
   Sets the socket's backlog to this value. If unspecified or 0, the frontend's
   backlog is used instead, which generally defaults to the maxconn value.
 
-curves <curves>
-  This setting is only available when support for OpenSSL was built in. It sets
-  the string describing the list of elliptic curves algorithms ("curve suite")
-  that are negotiated during the SSL/TLS handshake with ECDHE. The format of the
-  string is a colon-delimited list of curve name.
-  Example: "X25519:P-256" (without quote)
-  When "curves" is set, "ecdhe" parameter is ignored.
-
-ecdhe <named curve>
-  This setting is only available when support for OpenSSL was built in. It sets
-  the named curve (RFC 4492) used to generate ECDH ephemeral keys. By default,
-  used named curve is prime256v1.
-
 ca-file <cafile>
   This setting is only available when support for OpenSSL was built in. It
   designates a PEM file from which to load CA certificates used to verify
@@ -14354,6 +14412,14 @@ crt-list <file>
         certW.pem                   *.domain.tld !secure.domain.tld
         certS.pem [curves X25519:P-256 ciphers ECDHE-ECDSA-AES256-GCM-SHA384] secure.domain.tld
 
+curves <curves>
+  This setting is only available when support for OpenSSL was built in. It sets
+  the string describing the list of elliptic curves algorithms ("curve suite")
+  that are negotiated during the SSL/TLS handshake with ECDHE. The format of the
+  string is a colon-delimited list of curve name.
+  Example: "X25519:P-256" (without quote)
+  When "curves" is set, "ecdhe" parameter is ignored.
+
 defer-accept
   Is an optional keyword which is supported only on certain Linux kernels. It
   states that a connection will only be accepted once some data arrive on it,
@@ -14366,6 +14432,11 @@ defer-accept
   the client talks. This can cause issues with front firewalls which would see
   an established connection while the proxy will only see it in SYN_RECV. This
   option is only supported on TCPv4/TCPv6 sockets and ignored by other ones.
+
+ecdhe <named curve>
+  This setting is only available when support for OpenSSL was built in. It sets
+  the named curve (RFC 4492) used to generate ECDH ephemeral keys. By default,
+  used named curve is prime256v1.
 
 expose-fd listeners
   This option is only usable with the stats socket. It gives your stats socket
@@ -14464,18 +14535,6 @@ level <level>
     counters).
   - "admin" should be used with care, as everything is permitted (e.g. clear
     all counters).
-
-severity-output <format>
-  This setting is used with the stats sockets only to configure severity
-  level output prepended to informational feedback messages. Severity
-  level of messages can range between 0 and 7, conforming to syslog
-  rfc5424. Valid and successful socket commands requesting data
-  (i.e. "show map", "get acl foo" etc.) will never have a severity level
-  prepended. It is ignored by other sockets. <format> can be one of :
-  - "none" (default) no severity level is prepended to feedback messages.
-  - "number" severity level is prepended as a number.
-  - "string" severity level is prepended as a string following the
-    rfc5424 convention.
 
 maxconn <maxconn>
   Limits the sockets to this number of concurrent connections. Extraneous
@@ -14675,6 +14734,18 @@ quic-force-retry
   See https://www.rfc-editor.org/rfc/rfc9000.html#section-8.1.2 for more
   information about QUIC retry.
 
+severity-output <format>
+  This setting is used with the stats sockets only to configure severity
+  level output prepended to informational feedback messages. Severity
+  level of messages can range between 0 and 7, conforming to syslog
+  rfc5424. Valid and successful socket commands requesting data
+  (i.e. "show map", "get acl foo" etc.) will never have a severity level
+  prepended. It is ignored by other sockets. <format> can be one of :
+  - "none" (default) no severity level is prepended to feedback messages.
+  - "number" severity level is prepended as a number.
+  - "string" severity level is prepended as a string following the
+    rfc5424 convention.
+
 shards <number> | by-thread
   In multi-threaded mode, on operating systems supporting multiple listeners on
   the same IP:port, this will automatically create this number of multiple
@@ -14804,20 +14875,6 @@ transparent
   kernel version. Some distribution kernels include backports of the feature,
   so check for support with your vendor.
 
-v4v6
-  Is an optional keyword which is supported only on most recent systems
-  including Linux kernels >= 2.4.21. It is used to bind a socket to both IPv4
-  and IPv6 when it uses the default address. Doing so is sometimes necessary
-  on systems which bind to IPv6 only by default. It has no effect on non-IPv6
-  sockets, and is overridden by the "v6only" option.
-
-v6only
-  Is an optional keyword which is supported only on most recent systems
-  including Linux kernels >= 2.4.21. It is used to bind a socket to IPv6 only
-  when it uses the default address. Doing so is sometimes preferred to doing it
-  system-wide as it is per-listener. It has no effect on non-IPv6 sockets and
-  has precedence over the "v4v6" option.
-
 uid <uid>
   Sets the owner of the UNIX sockets to the designated system uid. It can also
   be set by default in the global section's "unix-bind" statement. Note that
@@ -14831,6 +14888,20 @@ user <user>
   some platforms simply ignore this. This setting is equivalent to the "uid"
   setting except that the user name is used instead of its uid. This setting is
   ignored by non UNIX sockets.
+
+v4v6
+  Is an optional keyword which is supported only on most recent systems
+  including Linux kernels >= 2.4.21. It is used to bind a socket to both IPv4
+  and IPv6 when it uses the default address. Doing so is sometimes necessary
+  on systems which bind to IPv6 only by default. It has no effect on non-IPv6
+  sockets, and is overridden by the "v6only" option.
+
+v6only
+  Is an optional keyword which is supported only on most recent systems
+  including Linux kernels >= 2.4.21. It is used to bind a socket to IPv6 only
+  when it uses the default address. Doing so is sometimes preferred to doing it
+  system-wide as it is per-listener. It has no effect on non-IPv6 sockets and
+  has precedence over the "v4v6" option.
 
 verify [none|optional|required]
   This setting is only available when support for OpenSSL was built in. If set
@@ -18923,13 +18994,13 @@ fc_err : integer
   Returns the ID of the error that might have occurred on the current
   connection. Any strictly positive value of this fetch indicates that the
   connection did not succeed and would result in an error log being output (as
-  described in section 8.2.6). See the "fc_err_str" fetch for a full list of
+  described in section 8.2.5). See the "fc_err_str" fetch for a full list of
   error codes and their corresponding error message.
 
 fc_err_str : string
   Returns an error message describing what problem happened on the current
   connection, resulting in a connection failure. This string corresponds to the
-  "message" part of the error log format (see section 8.2.6). See below for a
+  "message" part of the error log format (see section 8.2.5). See below for a
   full list of error codes and their corresponding error messages :
 
   +----+---------------------------------------------------------------------------+
@@ -23540,7 +23611,7 @@ no option mpxs-conns
 
 set-param <name> <fmt> [ { if | unless } <condition> ]
   Set a FastCGI parameter that should be passed to this application. Its
-  value, defined by <fmt> must follows the log-format rules (see section 8.2.4
+  value, defined by <fmt> must follows the log-format rules (see section 8.2.6
   "Custom Log format"). It may optionally be followed by an ACL-based
   condition, in which case it will only be evaluated if the condition is true.
 

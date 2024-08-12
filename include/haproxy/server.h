@@ -44,6 +44,7 @@ extern struct dict server_key_dict;
 int srv_downtime(const struct server *s);
 int srv_lastsession(const struct server *s);
 int srv_getinter(const struct check *check);
+void srv_settings_init(struct server *srv);
 void srv_settings_cpy(struct server *srv, const struct server *src, int srv_tmpl);
 int parse_server(const char *file, int linenum, char **args, struct proxy *curproxy, const struct proxy *defproxy, int parse_flags);
 int srv_update_addr(struct server *s, void *ip, int ip_sin_family, const char *updater);
@@ -170,7 +171,7 @@ void srv_set_dyncookie(struct server *s);
 int srv_check_reuse_ws(struct server *srv);
 const struct mux_ops *srv_get_ws_proto(struct server *srv);
 
-/* increase the number of cumulated connections on the designated server */
+/* increase the number of cumulated streams on the designated server */
 static inline void srv_inc_sess_ctr(struct server *s)
 {
 	_HA_ATOMIC_INC(&s->counters.cum_sess);

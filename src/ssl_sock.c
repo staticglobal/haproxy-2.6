@@ -1479,7 +1479,7 @@ static int ssl_sock_load_ocsp(SSL_CTX *ctx, const struct cert_key_and_chain *ckc
 	struct certificate_ocsp *ocsp = NULL, *iocsp;
 	char *warn = NULL;
 	unsigned char *p;
-	void (*callback) (void);
+	void (*callback) (void) = NULL;
 
 
 	x = ckch->cert;
@@ -2776,10 +2776,14 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *arg)
 	}
 	if (has_ecdsa_sig) {  /* in very rare case: has ecdsa sign but not a ECDSA cipher */
 		const SSL_CIPHER *cipher;
+		STACK_OF(SSL_CIPHER) *ha_ciphers; /* haproxy side ciphers */
 		uint32_t cipher_id;
 		size_t len;
 		const uint8_t *cipher_suites;
+
+		ha_ciphers = SSL_get_ciphers(ssl);
 		has_ecdsa_sig = 0;
+
 #ifdef OPENSSL_IS_BORINGSSL
 		len = ctx->cipher_suites_len;
 		cipher_suites = ctx->cipher_suites;
@@ -2796,6 +2800,10 @@ int ssl_sock_switchctx_cbk(SSL *ssl, int *al, void *arg)
 			cipher = SSL_CIPHER_find(ssl, cipher_suites);
 #endif
 			if (!cipher)
+				continue;
+
+			/* check if this cipher is available in haproxy configuration */
+			if (sk_SSL_CIPHER_find(ha_ciphers, cipher) == -1)
 				continue;
 
 			cipher_id = SSL_CIPHER_get_id(cipher);
@@ -8138,6 +8146,8 @@ static void __ssl_sock_init(void)
 	xprt_register(XPRT_SSL, &ssl_sock);
 #if HA_OPENSSL_VERSION_NUMBER < 0x10100000L
 	SSL_library_init();
+#elif HA_OPENSSL_VERSION_NUMBER >= 0x10100000L
+	OPENSSL_init_ssl(0, NULL);
 #endif
 #if (!defined(OPENSSL_NO_COMP) && !defined(SSL_OP_NO_COMPRESSION))
 	cm = SSL_COMP_get_compression_methods();

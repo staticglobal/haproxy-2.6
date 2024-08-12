@@ -651,9 +651,9 @@ int assign_server(struct stream *s)
 	if ((s->be->lbprm.algo & BE_LB_KIND) != BE_LB_KIND_HI &&
 	    ((s->sess->flags & SESS_FL_PREFER_LAST) ||
 	     (s->be->options & PR_O_PREF_LAST))) {
-		struct sess_srv_list *srv_list;
-		list_for_each_entry(srv_list, &s->sess->srv_list, srv_list) {
-			struct server *tmpsrv = objt_server(srv_list->target);
+		struct sess_priv_conns *pconns;
+		list_for_each_entry(pconns, &s->sess->priv_conns, sess_el) {
+			struct server *tmpsrv = objt_server(pconns->target);
 
 			if (tmpsrv && tmpsrv->proxy == s->be &&
 			    ((s->sess->flags & SESS_FL_PREFER_LAST) ||
@@ -661,7 +661,7 @@ int assign_server(struct stream *s)
 			      server_has_room(tmpsrv) || (
 			      tmpsrv->queue.length + 1 < s->be->max_ka_queue))) &&
 			    srv_currently_usable(tmpsrv)) {
-				list_for_each_entry(conn, &srv_list->conn_list, session_list) {
+				list_for_each_entry(conn, &pconns->conn_list, sess_el) {
 					if (!(conn->flags & CO_FL_WAIT_XPRT)) {
 						srv = tmpsrv;
 						s->target = &srv->obj_type;
@@ -964,6 +964,7 @@ int assign_server_and_queue(struct stream *s)
 	struct server *srv;
 	int err;
 
+ balance_again:
 	if (s->pend_pos)
 		return SRV_STATUS_INTERNAL;
 
@@ -1032,8 +1033,18 @@ int assign_server_and_queue(struct stream *s)
 				return SRV_STATUS_FULL;
 
 			p = pendconn_add(s);
-			if (p)
+			if (p) {
+				/* There's a TOCTOU here: it may happen that between the
+				 * moment we decided to queue the request and the moment
+				 * it was done, the last active request on the server
+				 * ended and no new one will be able to dequeue that one.
+				 * Since we already have our server we don't care, this
+				 * will be handled by the caller which will check for
+				 * this condition and will immediately dequeue it if
+				 * possible.
+				 */
 				return SRV_STATUS_QUEUED;
+			}
 			else
 				return SRV_STATUS_INTERNAL;
 		}
@@ -1045,8 +1056,23 @@ int assign_server_and_queue(struct stream *s)
 	case SRV_STATUS_FULL:
 		/* queue this stream into the proxy's queue */
 		p = pendconn_add(s);
-		if (p)
+		if (p) {
+			/* There's a TOCTOU here: it may happen that between the
+			 * moment we decided to queue the request and the moment
+			 * it was done, the last active request in the backend
+			 * ended and no new one will be able to dequeue that one.
+			 * This is more visible with maxconn 1 where it can
+			 * happen 1/1000 times, though the vast majority are
+			 * correctly recovered from. Since it's so rare and we
+			 * have no server assigned, the best solution in this
+			 * case is to detect the condition, dequeue our request
+			 * and balance it again.
+			 */
+			if (unlikely(pendconn_must_try_again(p)))
+				goto balance_again;
+
 			return SRV_STATUS_QUEUED;
+		}
 		else
 			return SRV_STATUS_INTERNAL;
 
@@ -1919,7 +1945,16 @@ int srv_redispatch_connect(struct stream *s)
 	case SRV_STATUS_QUEUED:
 		s->conn_exp = tick_add_ifset(now_ms, s->be->timeout.queue);
 		s->scb->state = SC_ST_QUE;
-		/* do nothing else and do not wake any other stream up */
+
+		/* handle the unlikely event where we added to the server's
+		 * queue just after checking the server was full and before
+		 * it released its last entry (with extremely low maxconn).
+		 * Not needed for backend queues, already handled in
+		 * assign_server_and_queue().
+		 */
+		if (unlikely(srv && may_dequeue_tasks(srv, s->be)))
+			process_srv_queue(srv);
+
 		return 1;
 
 	case SRV_STATUS_INTERNAL:

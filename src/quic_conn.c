@@ -753,7 +753,10 @@ void qc_kill_conn(struct quic_conn *qc)
 	TRACE_PROTO("killing the connection", QUIC_EV_CONN_KILL, qc);
 	qc->flags |= QUIC_FL_CONN_TO_KILL;
 	qc->flags &= ~QUIC_FL_CONN_RETRANS_NEEDED;
-	task_wakeup(qc->idle_timer_task, TASK_WOKEN_OTHER);
+
+	if (!(qc->flags & QUIC_FL_CONN_EXP_TIMER))
+		task_wakeup(qc->idle_timer_task, TASK_WOKEN_OTHER);
+
 	TRACE_LEAVE(QUIC_EV_CONN_KILL, qc);
 }
 
@@ -2439,6 +2442,17 @@ static inline int qc_provide_cdata(struct quic_enc_level *el,
 			ERR_clear_error();
 			goto leave;
 		}
+#if defined(LIBRESSL_VERSION_NUMBER)
+		else if (qc->flags & QUIC_FL_CONN_IMMEDIATE_CLOSE) {
+			/* Some libressl versions emit TLS alerts without making the handshake
+			 * (SSL_do_handshake()) fail. This is at least the case for
+			 * libressl-3.9.0 when forcing the TLS cipher to TLS_AES_128_CCM_SHA256.
+			 */
+			TRACE_ERROR("SSL handshake error", QUIC_EV_CONN_IO_CB, qc, &state, &ssl_err);
+			HA_ATOMIC_INC(&qc->prx_counters->hdshk_fail);
+			goto leave;
+		}
+#endif
 
 		TRACE_PROTO("SSL handshake OK", QUIC_EV_CONN_IO_CB, qc, &state);
 
@@ -2458,8 +2472,17 @@ static inline int qc_provide_cdata(struct quic_enc_level *el,
 		qc->wait_event.tasklet->process = quic_conn_app_io_cb;
 		if (qc_is_listener(ctx->qc)) {
 			qc->state = QUIC_HS_ST_CONFIRMED;
-			/* The connection is ready to be accepted. */
-			quic_accept_push_qc(qc);
+
+			if (!(qc->flags & QUIC_FL_CONN_ACCEPT_REGISTERED)) {
+				quic_accept_push_qc(qc);
+			}
+			else {
+				/* Connection already accepted if 0-RTT used.
+				 * In this case, schedule quic-conn to ensure
+				 * post-handshake frames are emitted.
+				 */
+				tasklet_wakeup(qc->wait_event.tasklet);
+			}
 		}
 		else {
 			qc->state = QUIC_HS_ST_COMPLETE;
@@ -3504,8 +3527,6 @@ static int qc_prep_pkts(struct quic_conn *qc, struct buffer *buf,
 		                       must_ack, padding, probe, cc, &err);
 		switch (err) {
 		case -3:
-			if (first_pkt)
-				qc_txb_store(buf, dglen, first_pkt);
 			qc_purge_tx_buf(qc, buf);
 			goto leave;
 		case -2:
@@ -5831,24 +5852,38 @@ static int send_stateless_reset(struct listener *l, struct sockaddr_storage *dst
 
 	TRACE_ENTER(QUIC_EV_STATELESS_RST);
 
+	/* RFC 9000 10.3. Stateless Reset
+	 *
+	 * Endpoints MUST discard packets that are too small to be valid QUIC
+	 * packets. To give an example, with the set of AEAD functions defined
+	 * in [QUIC-TLS], short header packets that are smaller than 21 bytes
+	 * are never valid.
+	 *
+	 * [...]
+	 *
+	 * RFC 9000 10.3.3. Looping
+	 *
+	 * An endpoint MUST ensure that every Stateless Reset that it sends is
+	 * smaller than the packet that triggered it, unless it maintains state
+	 * sufficient to prevent looping. In the event of a loop, this results
+	 * in packets eventually being too small to trigger a response.
+	 */
+	if (rxpkt->len <= QUIC_STATELESS_RESET_PACKET_MINLEN) {
+		TRACE_DEVEL("rxpkt too short", QUIC_EV_STATELESS_RST);
+		goto leave;
+	}
+
 	prx = l->bind_conf->frontend;
 	prx_counters = EXTRA_COUNTERS_GET(prx->extra_counters_fe, &quic_stats_module);
-	/* 10.3 Stateless Reset (https://www.rfc-editor.org/rfc/rfc9000.html#section-10.3)
-	 * The resulting minimum size of 21 bytes does not guarantee that a Stateless
-	 * Reset is difficult to distinguish from other packets if the recipient requires
-	 * the use of a connection ID. To achieve that end, the endpoint SHOULD ensure
-	 * that all packets it sends are at least 22 bytes longer than the minimum
-	 * connection ID length that it requests the peer to include in its packets,
-	 * adding PADDING frames as necessary. This ensures that any Stateless Reset
-	 * sent by the peer is indistinguishable from a valid packet sent to the endpoint.
+
+	/* RFC 9000 10.3. Stateless Reset
+	 *
 	 * An endpoint that sends a Stateless Reset in response to a packet that is
 	 * 43 bytes or shorter SHOULD send a Stateless Reset that is one byte shorter
 	 * than the packet it responds to.
 	 */
-
-	/* Note that we build at most a 42 bytes QUIC packet to mimic a short packet */
-	pktlen = rxpkt->len <= 43 ? rxpkt->len - 1 : 0;
-	pktlen = QUIC_MAX(QUIC_STATELESS_RESET_PACKET_MINLEN, pktlen);
+	pktlen = rxpkt->len <= 43 ? rxpkt->len - 1 :
+	                            QUIC_STATELESS_RESET_PACKET_MINLEN;
 	rndlen = pktlen - QUIC_STATELESS_RESET_TOKEN_LEN;
 
 	/* Put a header of random bytes */
@@ -5889,7 +5924,7 @@ static int quic_generate_retry_token_aad(unsigned char *aad,
 	unsigned char *p;
 
 	p = aad;
-	*(uint32_t *)p = htonl(version);
+	write_u32(p, htonl(version));
 	p += sizeof version;
 	p += quic_saddr_cpy(p, addr);
 	memcpy(p, cid->data, cid->len);
@@ -6404,6 +6439,9 @@ static struct quic_conn *quic_rx_pkt_retrieve_conn(struct quic_rx_packet *pkt,
 		}
 	}
 	else if (!qc) {
+		/* Stateless Reset sent even for Long header packets as haproxy
+		 * emits stateless_reset_token in its TPs.
+		 */
 		TRACE_PROTO("No connection on a non Initial packet", QUIC_EV_CONN_LPKT, NULL, NULL, NULL, pkt->version);
 		if (!send_stateless_reset(l, &dgram->saddr, pkt))
 			TRACE_ERROR("stateless reset not sent", QUIC_EV_CONN_LPKT, qc);
@@ -6882,6 +6920,7 @@ static inline int qc_build_frms(struct list *outlist, struct list *inlist,
 	ret = 0;
 	if (*len > room)
 		goto leave;
+	room -= *len;
 
 	/* If we are not probing we must take into an account the congestion
 	 * control window.
@@ -6915,8 +6954,8 @@ static inline int qc_build_frms(struct list *outlist, struct list *inlist,
 			            QUIC_EV_CONN_BCFRMS, qc, &room, len);
 			/* Compute the length of this CRYPTO frame header */
 			hlen = 1 + quic_int_getsize(cf->crypto.offset);
-			/* Compute the data length of this CRyPTO frame. */
-			dlen = max_stream_data_size(room, *len + hlen, cf->crypto.len);
+			/* Compute the data length of this CRYPTO frame. */
+			dlen = max_stream_data_size(room, hlen, cf->crypto.len);
 			TRACE_DEVEL(" CRYPTO data length (hlen, crypto.len, dlen)",
 			            QUIC_EV_CONN_BCFRMS, qc, &hlen, &cf->crypto.len, &dlen);
 			if (!dlen)
@@ -7011,7 +7050,7 @@ static inline int qc_build_frms(struct list *outlist, struct list *inlist,
 			hlen = 1 + quic_int_getsize(cf->stream.id) +
 				((cf->type & QUIC_STREAM_FRAME_TYPE_OFF_BIT) ? quic_int_getsize(cf->stream.offset.key) : 0);
 			/* Compute the data length of this STREAM frame. */
-			avail_room = room - hlen - *len;
+			avail_room = room - hlen;
 			if ((ssize_t)avail_room <= 0)
 				continue;
 

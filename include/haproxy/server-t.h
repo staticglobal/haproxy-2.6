@@ -286,6 +286,7 @@ struct server {
 	unsigned int next_takeover;             /* thread ID to try to steal connections from next time */
 
 	struct queue queue;			/* pending connections */
+	struct mt_list sess_conns;		/* list of private conns managed by a session on this server */
 
 	/* Element below are usd by LB algorithms and must be doable in
 	 * parallel to other threads reusing connections above.

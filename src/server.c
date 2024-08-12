@@ -2180,6 +2180,43 @@ int srv_prepare_for_resolution(struct server *srv, const char *hostname)
 	return -1;
 }
 
+/* Initialize default values for <srv>. Used both for dynamic servers and
+ * default servers. The latter are not initialized via new_server(), hence this
+ * function purpose. For static servers, srv_settings_cpy() is used instead
+ * reusing their default server instance.
+ */
+void srv_settings_init(struct server *srv)
+{
+	srv->check.inter = DEF_CHKINTR;
+	srv->check.fastinter = 0;
+	srv->check.downinter = 0;
+	srv->check.rise = DEF_RISETIME;
+	srv->check.fall = DEF_FALLTIME;
+	srv->check.port = 0;
+
+	srv->agent.inter = DEF_CHKINTR;
+	srv->agent.fastinter = 0;
+	srv->agent.downinter = 0;
+	srv->agent.rise = DEF_AGENT_RISETIME;
+	srv->agent.fall = DEF_AGENT_FALLTIME;
+	srv->agent.port = 0;
+
+	srv->maxqueue = 0;
+	srv->minconn = 0;
+	srv->maxconn = 0;
+
+	srv->max_reuse = -1;
+	srv->max_idle_conns = -1;
+	srv->pool_purge_delay = 5000;
+
+	srv->slowstart = 0;
+
+	srv->onerror = DEF_HANA_ONERR;
+	srv->consecutive_errors_limit = DEF_HANA_ERRLIMIT;
+
+	srv->uweight = srv->iweight = 1;
+}
+
 /*
  * Copy <src> server settings to <srv> server allocating
  * everything needed.
@@ -2342,6 +2379,8 @@ struct server *new_server(struct proxy *proxy)
 	srv->agent.server = srv;
 	srv->agent.proxy = proxy;
 	srv->xprt  = srv->check.xprt = srv->agent.xprt = xprt_get(XPRT_RAW);
+
+	MT_LIST_INIT(&srv->sess_conns);
 
 	srv->extra_counters = NULL;
 #ifdef USE_OPENSSL
@@ -2724,30 +2763,18 @@ static int _srv_parse_init(struct server **srv, char **args, int *cur_arg,
 			/* Copy default server settings to new server */
 			srv_settings_cpy(newsrv, &curproxy->defsrv, 0);
 		} else {
-			/* Initialize dynamic server weight to 1 */
-			newsrv->uweight = newsrv->iweight = 1;
+			srv_settings_init(newsrv);
 
 			/* A dynamic server is disabled on startup */
 			newsrv->next_admin = SRV_ADMF_FMAINT;
 			newsrv->next_state = SRV_ST_STOPPED;
 			server_recalc_eweight(newsrv, 0);
-
-			/* Set default values for checks */
-			newsrv->check.inter = DEF_CHKINTR;
-			newsrv->check.rise = DEF_RISETIME;
-			newsrv->check.fall = DEF_FALLTIME;
-
-			newsrv->agent.inter = DEF_CHKINTR;
-			newsrv->agent.rise = DEF_AGENT_RISETIME;
-			newsrv->agent.fall = DEF_AGENT_FALLTIME;
 		}
 		HA_SPIN_INIT(&newsrv->lock);
 	}
 	else {
 		*srv = newsrv = &curproxy->defsrv;
 		*cur_arg = 1;
-		newsrv->resolv_opts.family_prio = AF_INET6;
-		newsrv->resolv_opts.accept_duplicate_ip = 0;
 	}
 
 	free(fqdn);
@@ -3982,8 +4009,8 @@ static int srv_iterate_initaddr(struct server *srv)
 		case SRV_IADDR_IP:
 			ipcpy(&srv->init_addr, &srv->addr);
 			if (return_code) {
-				ha_warning("could not resolve address '%s', falling back to configured address.\n",
-					   name);
+				ha_notice("could not resolve address '%s', falling back to configured address.\n",
+					  name);
 			}
 			goto out;
 
@@ -5007,6 +5034,7 @@ static int cli_parse_delete_server(char **args, char *payload, struct appctx *ap
 	 * cleanup function should be implemented to be used here.
 	 */
 	if (srv->curr_used_conns || srv->curr_idle_conns ||
+	    !MT_LIST_ISEMPTY(&srv->sess_conns) ||
 	    !eb_is_empty(&srv->queue.head) || srv_has_streams(srv)) {
 		cli_err(appctx, "Server still has connections attached to it, cannot remove it.");
 		goto out;

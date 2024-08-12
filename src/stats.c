@@ -2646,7 +2646,7 @@ int stats_fill_be_stats(struct proxy *px, int flags, struct field *stats, int le
 				metric = mkf_u32(FO_CONFIG|FN_LIMIT, px->fullconn);
 				break;
 			case ST_F_STOT:
-				metric = mkf_u64(FN_COUNTER, px->be_counters.cum_conn);
+				metric = mkf_u64(FN_COUNTER, px->be_counters.cum_sess);
 				break;
 			case ST_F_BIN:
 				metric = mkf_u64(FN_COUNTER, px->be_counters.bytes_in);
@@ -4339,7 +4339,7 @@ static int stats_send_http_redirect(struct stconn *sc, struct htx *htx)
 		     (ctx->flags & STAT_NO_REFRESH) ? ";norefresh" : "",
 		     scope_txt);
 
-	flags = (HTX_SL_F_IS_RESP|HTX_SL_F_VER_11|HTX_SL_F_XFER_LEN|HTX_SL_F_CHNK);
+	flags = (HTX_SL_F_IS_RESP|HTX_SL_F_VER_11|HTX_SL_F_XFER_LEN|HTX_SL_F_CLEN|HTX_SL_F_BODYLESS);
 	sl = htx_add_stline(htx, HTX_BLK_RES_SL, flags, ist("HTTP/1.1"), ist("303"), ist("See Other"));
 	if (!sl)
 		goto full;

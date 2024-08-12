@@ -785,7 +785,6 @@ static void dump_crtlist_sslconf(struct buffer *buf, const struct ssl_bind_conf 
 		char *ptr = conf->npn_str;
 		int comma = 0;
 
-		if (space) chunk_appendf(buf, " ");
 		chunk_appendf(buf, "npn ");
 		while (len) {
 			unsigned short size;

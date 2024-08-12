@@ -27,6 +27,7 @@
 #include <haproxy/list.h>
 #include <haproxy/listener.h>
 #include <haproxy/pool.h>
+#include <haproxy/protocol-t.h>
 #include <haproxy/proto_quic.h>
 #include <haproxy/proxy-t.h>
 #include <haproxy/quic_conn.h>
@@ -294,6 +295,11 @@ static ssize_t quic_recv(int fd, void *out, size_t len,
 	if (ret < 0)
 		goto end;
 
+	if (unlikely(port_is_restricted((struct sockaddr_storage *)from, HA_PROTO_QUIC))) {
+		ret = -1;
+		goto end;
+	}
+
 	for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
 		switch (cmsg->cmsg_level) {
 		case IPPROTO_IP:
@@ -491,18 +497,15 @@ int qc_snd_buf(struct quic_conn *qc, const struct buffer *buf, size_t sz,
 struct quic_accept_queue *quic_accept_queues;
 
 /* Install <qc> on the queue ready to be accepted. The queue task is then woken
- * up. If <qc> accept is already scheduled or done, nothing is done.
+ * up.
  */
 void quic_accept_push_qc(struct quic_conn *qc)
 {
 	struct quic_accept_queue *queue = &quic_accept_queues[qc->tid];
 	struct li_per_thread *lthr = &qc->li->per_thr[qc->tid];
 
-	/* early return if accept is already in progress/done for this
-	 * connection
-	 */
-	if (qc->flags & QUIC_FL_CONN_ACCEPT_REGISTERED)
-		return;
+	/* A connection must only be accepted once per instance. */
+	BUG_ON(qc->flags & QUIC_FL_CONN_ACCEPT_REGISTERED);
 
 	BUG_ON(MT_LIST_INLIST(&qc->accept_list));
 

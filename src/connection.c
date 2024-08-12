@@ -425,7 +425,7 @@ void conn_init(struct connection *conn, void *target)
 	conn->proxy_netns = NULL;
 	MT_LIST_INIT(&conn->toremove_list);
 	if (conn_is_back(conn))
-		LIST_INIT(&conn->session_list);
+		LIST_INIT(&conn->sess_el);
 	else
 		LIST_INIT(&conn->stopping_list);
 	conn->subs = NULL;
@@ -471,12 +471,12 @@ struct connection *conn_new(void *target)
 /* Releases a connection previously allocated by conn_new() */
 void conn_free(struct connection *conn)
 {
-	/* If the connection is owned by the session, remove it from its list
-	 */
-	if (conn_is_back(conn) && LIST_INLIST(&conn->session_list)) {
+	/* If the connection is owned by the session, remove it from its list. */
+	if (LIST_INLIST(&conn->sess_el))
 		session_unown_conn(conn->owner, conn);
-	}
-	else if (!(conn->flags & CO_FL_PRIVATE)) {
+
+	/* If the connection is not private, it is accounted by the server. */
+	if (!(conn->flags & CO_FL_PRIVATE)) {
 		if (obj_type(conn->target) == OBJ_TYPE_SERVER)
 			srv_release_conn(__objt_server(conn->target), conn);
 	}
@@ -1014,94 +1014,96 @@ int conn_recv_proxy(struct connection *conn, int flag)
 			break;
 		}
 
-		/* TLV parsing */
-		while (tlv_offset < total_v2_len) {
-			struct tlv *tlv_packet;
-			struct ist tlv;
-
-			/* Verify that we have at least TLV_HEADER_SIZE bytes left */
-			if (tlv_offset + TLV_HEADER_SIZE > total_v2_len)
-				goto bad_header;
-
-			tlv_packet = (struct tlv *) &trash.area[tlv_offset];
-			tlv = ist2((const char *)tlv_packet->value, get_tlv_length(tlv_packet));
-			tlv_offset += istlen(tlv) + TLV_HEADER_SIZE;
-
-			/* Verify that the TLV length does not exceed the total PROXYv2 length */
-			if (tlv_offset > total_v2_len)
-				goto bad_header;
-
-			switch (tlv_packet->type) {
-			case PP2_TYPE_CRC32C: {
-				uint32_t n_crc32c;
-
-				/* Verify that this TLV is exactly 4 bytes long */
-				if (istlen(tlv) != 4)
-					goto bad_header;
-
-				n_crc32c = read_n32(istptr(tlv));
-				write_n32(istptr(tlv), 0); // compute with CRC==0
-
-				if (hash_crc32c(trash.area, total_v2_len) != n_crc32c)
-					goto bad_header;
-				break;
-			}
-#ifdef USE_NS
-			case PP2_TYPE_NETNS: {
-				const struct netns_entry *ns;
-
-				ns = netns_store_lookup(istptr(tlv), istlen(tlv));
-				if (ns)
-					conn->proxy_netns = ns;
-				break;
-			}
-#endif
-			case PP2_TYPE_AUTHORITY: {
-				if (istlen(tlv) > PP2_AUTHORITY_MAX)
-					goto bad_header;
-				conn->proxy_authority = ist2(pool_alloc(pool_head_authority), 0);
-				if (!isttest(conn->proxy_authority))
-					goto fail;
-				if (istcpy(&conn->proxy_authority, tlv, PP2_AUTHORITY_MAX) < 0) {
-					/* This is impossible, because we verified that the TLV value fits. */
-					my_unreachable();
-					goto fail;
-				}
-				break;
-			}
-			case PP2_TYPE_UNIQUE_ID: {
-				if (istlen(tlv) > UNIQUEID_LEN)
-					goto bad_header;
-				conn->proxy_unique_id = ist2(pool_alloc(pool_head_uniqueid), 0);
-				if (!isttest(conn->proxy_unique_id))
-					goto fail;
-				if (istcpy(&conn->proxy_unique_id, tlv, UNIQUEID_LEN) < 0) {
-					/* This is impossible, because we verified that the TLV value fits. */
-					my_unreachable();
-					goto fail;
-				}
-				break;
-			}
-			default:
-				break;
-			}
-		}
-
-		/* Verify that the PROXYv2 header ends at a TLV boundary.
-		 * This is can not be true, because the TLV parsing already
-		 * verifies that a TLV does not exceed the total length and
-		 * also that there is space for a TLV header.
-		 */
-		BUG_ON(tlv_offset != total_v2_len);
-
 		/* unsupported protocol, keep local connection address */
 		break;
 	case 0x00: /* LOCAL command */
 		/* keep local connection address for LOCAL */
+
+		tlv_offset = PP2_HEADER_LEN;
 		break;
 	default:
 		goto bad_header; /* not a supported command */
 	}
+
+	/* TLV parsing */
+	while (tlv_offset < total_v2_len) {
+		struct tlv *tlv_packet;
+		struct ist tlv;
+
+		/* Verify that we have at least TLV_HEADER_SIZE bytes left */
+		if (tlv_offset + TLV_HEADER_SIZE > total_v2_len)
+			goto bad_header;
+
+		tlv_packet = (struct tlv *) &trash.area[tlv_offset];
+		tlv = ist2((const char *)tlv_packet->value, get_tlv_length(tlv_packet));
+		tlv_offset += istlen(tlv) + TLV_HEADER_SIZE;
+
+		/* Verify that the TLV length does not exceed the total PROXYv2 length */
+		if (tlv_offset > total_v2_len)
+			goto bad_header;
+
+		switch (tlv_packet->type) {
+		case PP2_TYPE_CRC32C: {
+			uint32_t n_crc32c;
+
+			/* Verify that this TLV is exactly 4 bytes long */
+			if (istlen(tlv) != 4)
+				goto bad_header;
+
+			n_crc32c = read_n32(istptr(tlv));
+			write_n32(istptr(tlv), 0); // compute with CRC==0
+
+			if (hash_crc32c(trash.area, total_v2_len) != n_crc32c)
+				goto bad_header;
+			break;
+		}
+#ifdef USE_NS
+		case PP2_TYPE_NETNS: {
+			const struct netns_entry *ns;
+
+			ns = netns_store_lookup(istptr(tlv), istlen(tlv));
+			if (ns)
+				conn->proxy_netns = ns;
+			break;
+		}
+#endif
+		case PP2_TYPE_AUTHORITY: {
+			if (istlen(tlv) > PP2_AUTHORITY_MAX)
+				goto bad_header;
+			conn->proxy_authority = ist2(pool_alloc(pool_head_authority), 0);
+			if (!isttest(conn->proxy_authority))
+				goto fail;
+			if (istcpy(&conn->proxy_authority, tlv, PP2_AUTHORITY_MAX) < 0) {
+				/* This is impossible, because we verified that the TLV value fits. */
+				my_unreachable();
+				goto fail;
+			}
+			break;
+		}
+		case PP2_TYPE_UNIQUE_ID: {
+			if (istlen(tlv) > UNIQUEID_LEN)
+				goto bad_header;
+			conn->proxy_unique_id = ist2(pool_alloc(pool_head_uniqueid), 0);
+			if (!isttest(conn->proxy_unique_id))
+				goto fail;
+			if (istcpy(&conn->proxy_unique_id, tlv, UNIQUEID_LEN) < 0) {
+				/* This is impossible, because we verified that the TLV value fits. */
+				my_unreachable();
+				goto fail;
+			}
+			break;
+		}
+		default:
+			break;
+		}
+	}
+
+	/* Verify that the PROXYv2 header ends at a TLV boundary.
+	 * This is can not be true, because the TLV parsing already
+	 * verifies that a TLV does not exceed the total length and
+	 * also that there is space for a TLV header.
+	 */
+	BUG_ON(tlv_offset != total_v2_len);
 
 	trash.data = total_v2_len;
 	goto eat_header;

@@ -173,23 +173,23 @@ static int quic_transport_param_dec_version_info(struct tp_version_information *
                                                  const unsigned char *end, int server)
 {
 	size_t tp_len = end - *buf;
-	const uint32_t *ver, *others;
+	const unsigned char *ver, *others;
 
 	/* <tp_len> must be a multiple of sizeof(uint32_t) */
 	if (tp_len < sizeof tp->choosen || (tp_len & 0x3))
 		return 0;
 
-	tp->choosen = ntohl(*(uint32_t *)*buf);
+	tp->choosen = ntohl(read_u32(*buf));
 	/* Must not be null */
 	if (!tp->choosen)
 		return 0;
 
 	*buf += sizeof tp->choosen;
-	others = (const uint32_t *)*buf;
+	others = *buf;
 
 	/* Others versions must not be null */
-	for (ver = others; ver < (const uint32_t *)end; ver++) {
-		if (!*ver)
+	for (ver = others; ver < end; ver += 4) {
+		if (!read_u32(ver))
 			return 0;
 	}
 
@@ -197,19 +197,19 @@ static int quic_transport_param_dec_version_info(struct tp_version_information *
 		/* TODO: not supported */
 		return 0;
 
-	for (ver = others; ver < (const uint32_t *)end; ver++) {
+	for (ver = others; ver < end; ver += 4) {
 		if (!tp->negotiated_version) {
 			int i;
 
 			for (i = 0; i < quic_versions_nb; i++) {
-				if (ntohl(*ver) == quic_versions[i].num) {
+				if (ntohl(read_u32(ver)) == quic_versions[i].num) {
 					tp->negotiated_version = &quic_versions[i];
 					break;
 				}
 			}
 		}
 
-		if (preferred_version && ntohl(*ver) == preferred_version->num) {
+		if (preferred_version && ntohl(read_u32(ver)) == preferred_version->num) {
 			tp->negotiated_version = preferred_version;
 			goto out;
 		}

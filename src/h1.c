@@ -129,6 +129,10 @@ int h1_parse_xfer_enc_header(struct h1m *h1m, struct ist value)
 	char *e, *n;
 	struct ist word;
 
+	/* Reject empty header */
+	if (istptr(value) == istend(value))
+	    goto fail;
+
 	h1m->flags |= H1_MF_XFER_ENC;
 
 	word.ptr = value.ptr - 1; // -1 for next loop's pre-increment
@@ -140,6 +144,10 @@ int h1_parse_xfer_enc_header(struct h1m *h1m, struct ist value)
 			continue;
 
 		n = http_find_hdr_value_end(word.ptr, e); // next comma or end of line
+
+		/* a comma at the end means the last value is empty */
+		if (n+1 == e)
+			goto fail;
 		word.len = n - word.ptr;
 
 		/* trim trailing blanks */
@@ -147,7 +155,12 @@ int h1_parse_xfer_enc_header(struct h1m *h1m, struct ist value)
 			word.len--;
 
 		h1m->flags &= ~H1_MF_CHNK;
-		if (isteqi(word, ist("chunked"))) {
+
+		/* empty values are forbidden */
+		if (!word.len)
+			goto fail;
+
+		else if (isteqi(word, ist("chunked"))) {
 			if (h1m->flags & H1_MF_TE_CHUNKED) {
 				/* cf RFC7230#3.3.1 : A sender MUST NOT apply
 				 * chunked more than once to a message body
@@ -183,11 +196,11 @@ int h1_parse_xfer_enc_header(struct h1m *h1m, struct ist value)
  * is hast header, its value is normalized. 0 is returned on success, -1 if the
  * authority is invalid and -2 if the host is invalid.
  */
-static int h1_validate_connect_authority(struct ist authority, struct ist *host_hdr)
+static int h1_validate_connect_authority(struct ist scheme, struct ist authority, struct ist *host_hdr)
 {
 	struct ist uri_host, uri_port, host, host_port;
 
-	if (!isttest(authority))
+	if (isttest(scheme) || !isttest(authority))
 		goto invalid_authority;
 	uri_host = authority;
 	uri_port = http_get_host_port(authority);
@@ -575,12 +588,9 @@ int h1_headers_to_hdr_list(char *start, const char *stop,
 #ifdef HA_UNALIGNED_LE
 		/* speedup: skip bytes not between 0x24 and 0x7e inclusive */
 		while (ptr <= end - sizeof(int)) {
-			int x = *(int *)ptr - 0x24242424;
-			if (x & 0x80808080)
-				break;
+			uint x = *(uint *)ptr;
 
-			x -= 0x5b5b5b5b;
-			if (!(x & 0x80808080))
+			if (((x - 0x24242424) | (0x7e7e7e7e - x)) & 0x80808080U)
 				break;
 
 			ptr += sizeof(int);
@@ -1105,11 +1115,15 @@ int h1_headers_to_hdr_list(char *start, const char *stop,
 
 		if (!(h1m->flags & (H1_MF_HDRS_ONLY|H1_MF_RESP))) {
 			struct http_uri_parser parser = http_uri_parser_init(sl.rq.u);
-			struct ist scheme, authority;
+			struct ist scheme, authority = IST_NULL;
 			int ret;
 
 			scheme = http_parse_scheme(&parser);
-			authority = http_parse_authority(&parser, 1);
+			if (istlen(scheme) || sl.rq.meth == HTTP_METH_CONNECT) {
+				/* Expect an authority if for CONNECT method or if there is a scheme */
+				authority = http_parse_authority(&parser, 1);
+			}
+
 			if (sl.rq.meth == HTTP_METH_CONNECT) {
 				struct ist *host = ((host_idx != -1) ? &hdr[host_idx].v : NULL);
 
@@ -1120,7 +1134,7 @@ int h1_headers_to_hdr_list(char *start, const char *stop,
 				 * As of trymax-23.2, native clients should now all be using GET for these requests,
 				 * but it may take some time for mobile/external clients to also migrate
 				 */
-				//ret = h1_validate_connect_authority(authority, host);
+				//ret = h1_validate_connect_authority(scheme, authority, host);
 				ret = 0;
 				if (ret < 0) {
 					if (h1m->err_pos < -1) {

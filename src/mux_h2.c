@@ -663,8 +663,10 @@ static void h2_trace(enum trace_level level, uint64_t mask, const struct trace_s
 				chunk_appendf(&trace_buf, " dsi=%d", h2c->dsi);
 			if (h2s == h2_idle_stream)
 				chunk_appendf(&trace_buf, " h2s=IDL");
-			else if (h2s != h2_closed_stream)
+			else if (h2s != h2_closed_stream && h2s != h2_refused_stream && h2s != h2_error_stream)
 				chunk_appendf(&trace_buf, " h2s=%p(%d,%s)", h2s, h2s->id, h2s_st_to_str(h2s->st));
+			else if (h2c->dsi > 0) // don't show that before sid is known
+				chunk_appendf(&trace_buf, " h2s=CLO");
 			if (h2s->id && h2s->errcode)
 				chunk_appendf(&trace_buf, " err=%s/%02x", h2_err_str(h2s->errcode), h2s->errcode);
 		}
@@ -3031,7 +3033,7 @@ static struct h2s *h2c_frt_handle_headers(struct h2c *h2c, struct h2s *h2s)
 	h2_release_buf(h2c, &rxbuf);
 	h2c->st0 = H2_CS_FRAME_E;
 
-	TRACE_USER("rejected H2 request", H2_EV_RX_FRAME|H2_EV_RX_HDR|H2_EV_STRM_NEW|H2_EV_STRM_END, h2c->conn, 0, &rxbuf);
+	TRACE_USER("rejected H2 request", H2_EV_RX_FRAME|H2_EV_RX_HDR|H2_EV_STRM_NEW|H2_EV_STRM_END, h2c->conn, h2s, &rxbuf);
 	TRACE_DEVEL("leaving on error", H2_EV_RX_FRAME|H2_EV_RX_HDR, h2c->conn, h2s);
 	return h2s;
 }
@@ -4679,7 +4681,7 @@ static void h2_detach(struct sedesc *sd)
 				}
 				else if (!h2c->conn->hash_node->node.node.leaf_p &&
 					 h2_avail_streams(h2c->conn) > 0 && objt_server(h2c->conn->target) &&
-					 !LIST_INLIST(&h2c->conn->session_list)) {
+					 !LIST_INLIST(&h2c->conn->sess_el)) {
 					eb64_insert(&__objt_server(h2c->conn->target)->per_thr[tid].avail_conns,
 					            &h2c->conn->hash_node->node);
 				}

@@ -30,6 +30,7 @@
 #include <haproxy/listener.h>
 #include <haproxy/log.h>
 #include <haproxy/namespace.h>
+#include <haproxy/protocol-t.h>
 #include <haproxy/proto_sockpair.h>
 #include <haproxy/sock.h>
 #include <haproxy/sock_inet.h>
@@ -108,6 +109,9 @@ struct connection *sock_accept_conn(struct listener *l, int *status)
 				 p->id);
 			goto fail_conn;
 		}
+
+		if (unlikely(port_is_restricted(addr, HA_PROTO_TCP)))
+			goto fail_conn;
 
 		/* Perfect, the connection was accepted */
 		conn = conn_new(&l->obj_type);
@@ -807,6 +811,13 @@ int sock_conn_check(struct connection *conn)
 	return 0;
 
  wait:
+	/* we may arrive here due to connect() misleadingly reporting EALREADY
+	 * in some corner cases while the system disagrees and reports an error
+	 * on the FD.
+	 */
+	if (fdtab[fd].state & FD_POLL_ERR)
+		goto out_error;
+
 	fd_cant_send(fd);
 	fd_want_send(fd);
 	return 0;

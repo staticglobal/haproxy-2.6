@@ -84,8 +84,8 @@
 
 #if defined(USE_POLL)
 #include <poll.h>
-#include <errno.h>
 #endif
+#include <errno.h>
 
 #include <haproxy/api.h>
 #include <haproxy/activity.h>
@@ -863,8 +863,8 @@ void my_closefrom(int start)
 				break;
 		} while (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR || errno == ENOMEM);
 
-		if (ret)
-			ret = fd - start;
+		/* always check the whole range */
+		ret = fd - start;
 
 		for (idx = 0; idx < ret; idx++) {
 			if (poll_events[idx].revents & POLLNVAL)
@@ -1026,7 +1026,7 @@ int init_pollers()
 	int p;
 	struct poller *bp;
 
-	if ((fdtab_addr = calloc(global.maxsock, sizeof(*fdtab) + 64)) == NULL) {
+	if ((fdtab_addr = calloc(1, global.maxsock * sizeof(*fdtab) + 64)) == NULL) {
 		ha_alert("Not enough memory to allocate %d entries for fdtab!\n", global.maxsock);
 		goto fail_tab;
 	}

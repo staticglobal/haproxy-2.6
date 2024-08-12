@@ -333,6 +333,11 @@ list of options is :
         the byte's value to -dM but using this option allows to disable/enable
         use of a previously set value.
 
+  -dR : disable SO_REUSEPORT socket option on listening ports. It is equivalent
+    to the "global" section's "noreuseport" keyword. This may be applied in
+    multi-threading scenarios, when load distribution issues observed among the
+    haproxy threads (could be monitored with top).
+
   -dS : disable use of the splice() system call. It is equivalent to the
     "global" section's "nosplice" keyword. This may be used when splice() is
     suspected to behave improperly or to cause performance issues, or when
@@ -381,6 +386,12 @@ list of options is :
     list of address resolution methods for all servers, ensuring that even if
     the libc fails to resolve an address, the startup sequence is not
     interrupted.
+
+  -dv : disable the use of the "evports" poller. It is equivalent to the
+    "global" section's keyword "noevports". It is mostly useful when suspecting
+    a bug related to this poller. On systems supporting event ports (SunOS
+    derived from Solaris 10 and later), the fallback will generally be the
+    "poll" poller.
 
   -m <limit> : limit the total allocatable memory to <limit> megabytes across
     all processes. This may cause some connection refusals or some slowdowns
@@ -434,11 +445,16 @@ list of options is :
   -x <unix_socket> : connect to the specified socket and try to retrieve any
     listening sockets from the old process, and use them instead of trying to
     bind new ones. This is useful to avoid missing any new connection when
-    reloading the configuration on Linux. The capability must be enable on the
-    stats socket using "expose-fd listeners" in your configuration.
-    In master-worker mode, the master will use this option upon a reload with
-    the "sockpair@" syntax, which allows the master to connect directly to a
-    worker without using stats socket declared in the configuration.
+    reloading the configuration on Linux.
+
+    Without master-worker mode, the capability must be enable on the stats
+    socket using "expose-fd listeners" in your configuration.
+
+    In master-worker mode, it does not need "expose-fd listeners", the master
+    will use automatically this option upon a reload with the "sockpair@"
+    syntax, which allows the master to connect directly to a worker without using
+    any stats socket declared in the configuration. If you want to disable this,
+    you can pass -x /dev/null.
 
 A safe way to start HAProxy from an init file consists in forcing the daemon
 mode, storing existing pids to a pid file and using this pid file to notify
@@ -3019,8 +3035,8 @@ show sess <id>
   The special id "all" dumps the states of all sessions, which must be avoided
   as much as possible as it is highly CPU intensive and can take a lot of time.
 
-show stat [domain <dns|proxy>] [{<iid>|<proxy>} <type> <sid>] [typed|json] \
-          [desc] [up|no-maint]
+show stat [domain <resolvers|proxy>] [{<iid>|<proxy>} <type> <sid>] \
+          [typed|json] [desc] [up|no-maint]
   Dump statistics. The domain is used to select which statistics to print; dns
   and proxy are available for now. By default, the CSV format is used; you can
   activate the extended typed output format described in the section above if
@@ -4200,4 +4216,3 @@ A safe configuration will have :
     group allowed to access the CLI so that nobody may access it :
 
       stats socket /var/run/haproxy.stat uid hatop gid hatop mode 600
-

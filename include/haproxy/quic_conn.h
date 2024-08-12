@@ -239,7 +239,7 @@ static inline int quic_read_uint32(uint32_t *val,
 	if (end - *buf < sizeof *val)
 		return 0;
 
-	*val = ntohl(*(uint32_t *)*buf);
+	*val = ntohl(read_u32(*buf));
 	*buf += sizeof *val;
 
 	return 1;
@@ -256,7 +256,7 @@ static inline int quic_write_uint32(unsigned char **buf,
 	if (end - *buf < sizeof val)
 		return 0;
 
-	*(uint32_t *)*buf = htonl(val);
+	write_u32(*buf, htonl(val));
 	*buf += sizeof val;
 
 	return 1;
@@ -466,6 +466,7 @@ static inline void quic_path_init(struct quic_path *path, int ipv4,
 	quic_loss_init(&path->loss);
 	path->mtu = max_dgram_sz;
 	path->cwnd = QUIC_MIN(10 * max_dgram_sz, QUIC_MAX(max_dgram_sz << 1, 14720U));
+	path->mcwnd = path->cwnd;
 	path->min_cwnd = max_dgram_sz << 1;
 	path->prep_in_flight = 0;
 	path->in_flight = 0;

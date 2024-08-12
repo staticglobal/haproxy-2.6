@@ -38,6 +38,8 @@ static inline void quic_loss_init(struct quic_loss *ql)
 	ql->rtt_var = QUIC_LOSS_INITIAL_RTT / 2;
 	ql->rtt_min = 0;
 	ql->pto_count = 0;
+	ql->nb_lost_pkt = 0;
+	ql->nb_reordered_pkt = 0;
 }
 
 /* Return 1 if a persitent congestion is observed for a list of

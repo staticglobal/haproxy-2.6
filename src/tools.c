@@ -4293,8 +4293,9 @@ int my_unsetenv(const char *name)
  * corresponding value. A variable is identified as a series of alphanumeric
  * characters or underscores following a '$' sign. The <in> string must be
  * free()able. NULL returns NULL. The resulting string might be reallocated if
- * some expansion is made. Variable names may also be enclosed into braces if
- * needed (eg: to concatenate alphanum characters).
+ * some expansion is made (an NULL will be returned on failure). Variable names
+ * may also be enclosed into braces if needed (eg: to concatenate alphanum
+ * characters).
  */
 char *env_expand(char *in)
 {
@@ -4349,6 +4350,9 @@ char *env_expand(char *in)
 		}
 
 		out = my_realloc2(out, out_len + (txt_end - txt_beg) + val_len + 1);
+		if (!out)
+			goto leave;
+
 		if (txt_end > txt_beg) {
 			memcpy(out + out_len, txt_beg, txt_end - txt_beg);
 			out_len += txt_end - txt_beg;
@@ -4363,6 +4367,7 @@ char *env_expand(char *in)
 
 	/* here we know that <out> was allocated and that we don't need <in> anymore */
 	free(in);
+leave:
 	return out;
 }
 

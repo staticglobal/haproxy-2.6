@@ -3226,7 +3226,7 @@ Filter class
 
   This class contains return codes some filter callback functions may return. It
   also contains configuration flags and some helper functions. To understand how
-  the filter API works, see `doc/internal/filters.txt` documentation.
+  the filter API works, see `doc/internals/api/filters.txt` documentation.
 
 .. js:attribute:: filter.CONTINUE
 
@@ -3759,6 +3759,10 @@ CertCache class
   :param string certificate.ocsp: An OCSP response in base64. (cf management.txt)
   :param string certificate.issuer: The certificate of the OCSP issuer.
   :param string certificate.sctl: An SCTL file.
+
+  .. Note::
+     This function may be slow. As such, it may only be used during startup
+     (main or init context) or from a yield-capable runtime context.
 
 .. code-block:: lua
 

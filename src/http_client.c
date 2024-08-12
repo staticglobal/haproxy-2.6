@@ -1290,7 +1290,7 @@ static int httpclient_postcheck()
 
 	/* copy logs from "global" log list */
 	list_for_each_entry(logsrv, &global.logsrvs, list) {
-		struct logsrv *node = malloc(sizeof(*node));
+		struct logsrv *node = dup_logsrv(logsrv);
 
 		if (!node) {
 			memprintf(&errmsg, "out of memory.");

@@ -178,6 +178,8 @@ struct global {
 	} unix_bind;
 	struct proxy *cli_fe;           /* the frontend holding the stats settings */
 	int numa_cpu_mapping;
+	uchar clt_privileged_ports;     /* bitmask to allow client privileged ports exchanges per protocol */
+	/* bytes hole here */
 	int cfg_curr_line;              /* line number currently being parsed */
 	const char *cfg_curr_file;      /* config file currently being parsed or NULL */
 	char *cfg_curr_section;         /* config section name currently being parsed or NULL */

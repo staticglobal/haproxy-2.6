@@ -106,7 +106,6 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 
 	qcs->stream = NULL;
 	qcs->qcc = qcc;
-	qcs->sd = NULL;
 	qcs->flags = QC_SF_NONE;
 	qcs->st = QC_SS_IDLE;
 	qcs->ctx = NULL;
@@ -158,6 +157,13 @@ static struct qcs *qcs_new(struct qcc *qcc, uint64_t id, enum qcs_type type)
 	qcs->subs = NULL;
 
 	qcs->err = 0;
+
+	qcs->sd = sedesc_new();
+	if (!qcs->sd)
+		goto err;
+	qcs->sd->se   = qcs;
+	qcs->sd->conn = qcc->conn;
+	se_fl_set(qcs->sd, SE_FL_T_MUX | SE_FL_ORPHAN | SE_FL_NOT_FIRST);
 
 	/* Allocate transport layer stream descriptor. Only needed for TX. */
 	if (!quic_stream_is_uni(id) || !quic_stream_is_remote(qcc, id)) {
@@ -585,14 +591,6 @@ struct stconn *qc_attach_sc(struct qcs *qcs, struct buffer *buf, char fin)
 {
 	struct qcc *qcc = qcs->qcc;
 	struct session *sess = qcc->conn->owner;
-
-	qcs->sd = sedesc_new();
-	if (!qcs->sd)
-		return NULL;
-
-	qcs->sd->se   = qcs;
-	qcs->sd->conn = qcc->conn;
-	se_fl_set(qcs->sd, SE_FL_T_MUX | SE_FL_ORPHAN | SE_FL_NOT_FIRST);
 
 	/* TODO duplicated from mux_h2 */
 	sess->t_idle = tv_ms_elapsed(&sess->tv_accept, &now) - sess->t_handshake;
@@ -1918,7 +1916,9 @@ static void qc_release(struct qcc *qcc)
 			qc_send(qcc);
 		}
 		else {
-			qcc_emit_cc_app(qcc, QC_ERR_NO_ERROR, 0);
+			/* Duplicate from qcc_emit_cc_app() for Transport error code. */
+			if (!(qcc->conn->handle.qc->flags & QUIC_FL_CONN_IMMEDIATE_CLOSE))
+				qcc->conn->handle.qc->err = quic_err_transport(QC_ERR_NO_ERROR);
 		}
 	}
 

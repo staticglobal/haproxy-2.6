@@ -3694,7 +3694,7 @@ static void fcgi_detach(struct sedesc *sd)
 			}
 			else if (!fconn->conn->hash_node->node.node.leaf_p &&
 				 fcgi_avail_streams(fconn->conn) > 0 && objt_server(fconn->conn->target) &&
-				 !LIST_INLIST(&fconn->conn->session_list)) {
+				 !LIST_INLIST(&fconn->conn->sess_el)) {
 				eb64_insert(&__objt_server(fconn->conn->target)->per_thr[tid].avail_conns,
 				            &fconn->conn->hash_node->node);
 			}

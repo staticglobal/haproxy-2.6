@@ -500,7 +500,7 @@ struct connection {
 	struct wait_event *subs; /* Task to wake when awaited events are ready */
 	struct mt_list toremove_list; /* list for connection to clean up */
 	union {
-		struct list session_list;  /* used by backend conns, list of attached connections to a session */
+		struct list sess_el;       /* used by private backend conns, list elem into session */
 		struct list stopping_list; /* used by frontend conns, attach point in mux stopping list */
 	};
 	union conn_handle handle;     /* connection handle at the socket layer */

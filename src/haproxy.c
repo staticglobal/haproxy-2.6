@@ -219,6 +219,8 @@ struct global global = {
 	.maxsslconn = DEFAULT_MAXSSLCONN,
 #endif
 #endif
+	/* by default do not protect against clients using privileged port */
+	.clt_privileged_ports = HA_PROTO_ANY,
 	/* others NULL OK */
 };
 
@@ -682,6 +684,7 @@ static void mworker_reexec()
 	char *msg = NULL;
 	struct rlimit limit;
 	struct mworker_proc *current_child = NULL;
+	int x_off = 0; /* disable -x by putting -x /dev/null */
 
 	mworker_block_signals();
 #if defined(USE_SYSTEMD)
@@ -733,6 +736,10 @@ static void mworker_reexec()
 	/* copy the program name */
 	next_argv[next_argc++] = old_argv[0];
 
+	/* we need to reintroduce /dev/null everytime */
+	if (old_unixsocket && strcmp(old_unixsocket, "/dev/null") == 0)
+		x_off = 1;
+
 	/* insert the new options just after argv[0] in case we have a -- */
 
 	if (getenv("HAPROXY_MWORKER_WAIT_ONLY") == NULL) {
@@ -753,14 +760,19 @@ static void mworker_reexec()
 				msg = NULL;
 			}
 		}
-
-		if (current_child) {
+		if (!x_off && current_child) {
 			/* add the -x option with the socketpair of the current worker */
 			next_argv[next_argc++] = "-x";
 			if ((next_argv[next_argc++] = memprintf(&msg, "sockpair@%d", current_child->ipc_fd[0])) == NULL)
 				goto alloc_error;
 			msg = NULL;
 		}
+	}
+
+	if (x_off) {
+		/* if the cmdline contained a -x /dev/null, continue to use it */
+		next_argv[next_argc++] = "-x";
+		next_argv[next_argc++] = "/dev/null";
 	}
 
 	/* copy the previous options */
@@ -952,19 +964,19 @@ static void sig_dump_state(struct sig_handler *sh)
 			chunk_printf(&trash,
 			             "SIGHUP: Proxy %s has no servers. Conn: act(FE+BE): %d+%d, %d pend (%d unass), tot(FE+BE): %lld+%lld.",
 			             p->id,
-			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_conn);
+			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_sess);
 		} else if (p->srv_act == 0) {
 			chunk_printf(&trash,
 			             "SIGHUP: Proxy %s %s ! Conn: act(FE+BE): %d+%d, %d pend (%d unass), tot(FE+BE): %lld+%lld.",
 			             p->id,
 			             (p->srv_bck) ? "is running on backup servers" : "has no server available",
-			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_conn);
+			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_sess);
 		} else {
 			chunk_printf(&trash,
 			             "SIGHUP: Proxy %s has %d active servers and %d backup servers available."
 			             " Conn: act(FE+BE): %d+%d, %d pend (%d unass), tot(FE+BE): %lld+%lld.",
 			             p->id, p->srv_act, p->srv_bck,
-			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_conn);
+			             p->feconn, p->beconn, p->totpend, p->queue.length, p->fe_counters.cum_conn, p->be_counters.cum_sess);
 		}
 		ha_warning("%s\n", trash.area);
 		send_log(p, LOG_NOTICE, "%s\n", trash.area);
@@ -1372,7 +1384,31 @@ static int compute_ideal_maxconn()
 	 *   - two FDs per connection
 	 */
 
-	if (global.fd_hard_limit && remain > global.fd_hard_limit)
+	/* on some modern distros for archs like amd64 fs.nr_open (kernel max)
+	 * could be in order of 1 billion. Systemd since the version 256~rc3-3
+	 * bumped fs.nr_open as the hard RLIMIT_NOFILE (rlim_fd_max_at_boot).
+	 * If we are started without any limits, we risk to finish with computed
+	 * maxconn = ~500000000, maxsock = ~2*maxconn. So, fdtab will be
+	 * extremely large and watchdog will kill the process, when it will try
+	 * to loop over the fdtab (see fd_reregister_all). Please note, that
+	 * fd_hard_limit is taken in account implicitly via 'ideal_maxconn'
+	 * value in all global.maxconn adjustements, when global.rlimit_memmax
+	 * is set:
+	 *
+	 *   MIN(global.maxconn, capped by global.rlimit_memmax, ideal_maxconn);
+	 *
+	 * It also caps global.rlimit_nofile, if it couldn't be set as rlim_cur
+	 * and as rlim_max. So, fd_hard_limitit is a good parameter to serve as
+	 * a safeguard, when no haproxy-specific limits are set, i.e.
+	 * rlimit_memmax, maxconn, rlimit_nofile. But it must be kept as a zero,
+	 * if only one of these ha-specific limits is presented in config or in
+	 * the cmdline.
+	 */
+	if (!global.fd_hard_limit && !global.maxconn && !global.rlimit_nofile
+	    && !global.rlimit_memmax)
+		global.fd_hard_limit = DEFAULT_MAXFD;
+
+	if (remain > global.fd_hard_limit)
 		remain = global.fd_hard_limit;
 
 	/* subtract listeners and checks */
@@ -2880,7 +2916,7 @@ void run_poll_loop()
 			if (thread_has_tasks()) {
 				activity[tid].wake_tasks++;
 				_HA_ATOMIC_AND(&sleeping_thread_mask, ~tid_bit);
-			} else if (signal_queue_len) {
+			} else if (signal_queue_len && tid == 0) {
 				/* this check is required to avoid
 				 * a race with wakeup on signals using wake_threads() */
 				_HA_ATOMIC_AND(&sleeping_thread_mask, ~tid_bit);
