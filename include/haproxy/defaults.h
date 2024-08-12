@@ -103,7 +103,13 @@
 #endif
 
 // max # args on a configuration line
-#define MAX_LINE_ARGS   64
+/*
+ * Modified by bholbrook@beyondtrust.com
+ * [NSB-3287] Increase the number of words allowed on a single line of haproxy.conf from 64 to 256
+ * to accommodate users who want to serve a large number of certificates, which results in a `bind`
+ * line with many `crt` arguments
+ */
+#define MAX_LINE_ARGS   256
 
 // maximum line size when parsing crt-bind-list config
 #define CRT_LINESIZE    65536
